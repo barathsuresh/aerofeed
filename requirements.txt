@@ -1,9 +1,13 @@
-# Runtime. No AWS SDK by design — core/ stays framework-agnostic and the local
-# pipeline substitutes SQLite, asyncio.Queue and a websockets server for
-# DynamoDB, Kinesis and API Gateway.
+# Runtime. core/ stays framework-agnostic: boto3 is imported only under aws/,
+# so run_local.py substitutes SQLite, asyncio.Queue and a websockets server for
+# DynamoDB, Kinesis and API Gateway without it, and core/ never learns which
+# backend it is talking to.
 requests>=2.31,<3
 websockets>=13,<18
 python-dotenv>=1.0,<2
+
+# AWS phase only. run_local.py does not import it.
+boto3>=1.34,<2
 
 # Dev/test.
 pytest>=8,<10
