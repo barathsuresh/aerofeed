@@ -1,0 +1,25 @@
+# Secrets — never commit. .env.example is the committed contract.
+.env
+.env.*
+!.env.example
+*.tfvars
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Terraform / SAM state, for later phases
+.terraform/
+*.tfstate
+*.tfstate.*
+.aws-sam/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Puts the repo root on sys.path so tests can `import core` without packaging.
+pythonpath = ["."]
+testpaths = ["tests"]

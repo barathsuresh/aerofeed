@@ -1,0 +1,5 @@
+# Runtime. No AWS SDK in this phase by design — core stays framework-agnostic.
+requests>=2.31,<3
+
+# Dev/test.
+pytest>=8,<10
