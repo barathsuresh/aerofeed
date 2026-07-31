@@ -1,18 +1,24 @@
 """Tests for the local backend: SQLite stores, stream and processor.
 
-No network and no real OpenSky calls — the poller's upstream is stubbed.
+No network and no real upstream calls — the poller's client is stubbed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 from dataclasses import replace
 
 import pytest
 
+from core.airplanes_live_client import MAX_RADIUS_NM
+from core.geo import snap_to_grid
 from core.models import AircraftState, Connection
 from core.storage_interface import ConnectionStore, PositionStore
 from local.local_stream import LocalStream, StreamRecord
+from local.local_scheduler import LocalScheduler
+from local.local_ws_server import LocalWebSocketServer
 from local.poller import Poller
 from local.processor import Processor
 from local.sqlite_store import SqliteConnectionStore, SqlitePositionStore, connect
@@ -274,21 +280,29 @@ async def _collect(sink, record):
 
 
 class StubClient:
-    """Stands in for OpenSkyClient; records the boxes it was asked for."""
+    """Stands in for AirplanesLiveClient; records the circles it was asked for."""
 
     def __init__(self, states):
         self._states = states
         self.calls = []
 
-    def get_states(self, lamin, lomin, lamax, lomax):
-        self.calls.append((lamin, lomin, lamax, lomax))
+    def get_states(self, lat, lon, radius_nm):
+        self.calls.append((lat, lon, radius_nm))
         return self._states
+
+
+def _poller(client, connections, stream):
+    """Poller with rate-limit pacing disabled — tests must not sleep 1.1s.
+
+    Pacing is asserted directly in test_poller_paces_calls_for_the_rate_limit.
+    """
+    return Poller(client, connections, stream, inter_call_delay_s=0)
 
 
 async def test_poller_polls_only_cells_with_subscribers(connections):
     stream = LocalStream()
     client = StubClient([PLANE])
-    poller = Poller(client, connections, stream)
+    poller = _poller(client, connections, stream)
 
     # Nobody connected: zero upstream calls. This is the whole cost argument.
     assert await poller.poll_once() == 0
@@ -296,13 +310,47 @@ async def test_poller_polls_only_cells_with_subscribers(connections):
 
     connections.put_connection(Connection("c1", "40_-75", 1.0))
     assert await poller.poll_once() == 1
-    assert client.calls == [(40.0, -75.0, 45.0, -70.0)]
+
+    # Cell 40..45 N, -75..-70 E -> centre of the box, radius covering its
+    # corners: hypot(2.5 * 60, 2.5 * 60 * cos(40 deg)) = hypot(150, 114.9).
+    (lat, lon, radius_nm), = client.calls
+    assert (lat, lon) == (42.5, -72.5)
+    assert radius_nm == pytest.approx(188.95, abs=0.05)
+
+
+async def test_poller_circle_covers_the_whole_cell(connections):
+    """Under-covering leaves a corner of a client's map permanently empty."""
+    stream = LocalStream()
+    client = StubClient([])
+    connections.put_connection(Connection("c1", "40_-75", 1.0))
+
+    await _poller(client, connections, stream).poll_once()
+    lat, lon, radius_nm = client.calls[0]
+
+    # Every corner of the cell must fall inside the requested circle.
+    for corner_lat, corner_lon in ((40.0, -75.0), (40.0, -70.0), (45.0, -75.0), (45.0, -70.0)):
+        north_nm = (corner_lat - lat) * 60.0
+        # Longitude degrees are widest at the corner nearest the equator.
+        east_nm = (corner_lon - lon) * 60.0 * math.cos(math.radians(min(abs(corner_lat), abs(lat))))
+        assert math.hypot(north_nm, east_nm) <= radius_nm + 1e-9
+
+
+async def test_poller_never_exceeds_the_providers_radius_limit(connections):
+    """A too-large radius is a 400, i.e. a silently lost poll."""
+    stream = LocalStream()
+    client = StubClient([])
+    poller = Poller(client, connections, stream, grid_size_degrees=5, inter_call_delay_s=0)
+    connections.put_connection(Connection("c1", "40_-75", 1.0))
+
+    await poller.poll_once()
+
+    assert client.calls[0][2] <= MAX_RADIUS_NM
 
 
 async def test_poller_calls_once_per_cell_not_per_client(connections):
     stream = LocalStream()
     client = StubClient([PLANE])
-    poller = Poller(client, connections, stream)
+    poller = _poller(client, connections, stream)
 
     for i in range(5):
         connections.put_connection(Connection(f"c{i}", "40_-75", 1.0))
@@ -311,9 +359,53 @@ async def test_poller_calls_once_per_cell_not_per_client(connections):
     assert len(client.calls) == 1
 
 
+async def test_poller_paces_calls_for_the_rate_limit(connections, monkeypatch):
+    """1 req/s is the provider's hard limit; the caller owns the pacing.
+
+    Sleeps are recorded rather than performed — the assertion is about how many
+    gaps there are and how long, not about wall clock.
+    """
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    stream = LocalStream()
+    client = StubClient([])
+    poller = Poller(client, connections, stream)  # real 1.1s delay
+
+    for key, (lat, lon) in {"40_-75": (42, -72), "50_0": (52, 2), "0_0": (2, 2)}.items():
+        connections.put_connection(Connection(f"c-{key}", key, 1.0))
+
+    await poller.poll_once()
+
+    # Three cells, two gaps: between calls, never before the first or after the
+    # last. Paying a delay for a lone cell would halve a single-client's cadence.
+    assert len(client.calls) == 3
+    assert slept == [1.1, 1.1]
+
+
+async def test_single_cell_poll_does_not_sleep(connections, monkeypatch):
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    stream = LocalStream()
+    connections.put_connection(Connection("c1", "40_-75", 1.0))
+
+    await Poller(StubClient([]), connections, LocalStream()).poll_once()
+
+    assert slept == []
+
+
 async def test_poller_tags_records_with_their_cell(connections):
     stream = LocalStream()
-    poller = Poller(StubClient([PLANE]), connections, stream)
+    poller = _poller(StubClient([PLANE]), connections, stream)
     connections.put_connection(Connection("c1", "40_-75", 1.0))
 
     await poller.poll_once()
@@ -323,3 +415,254 @@ async def test_poller_tags_records_with_their_cell(connections):
     consumer.cancel()
 
     assert seen[0].region_cell == "40_-75"
+
+
+# --- resubscription (panning the map) ----------------------------------------
+
+
+class FakeSocket:
+    """Minimal ServerConnection stand-in: records what was sent to the client."""
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+
+def _server(connections):
+    return LocalWebSocketServer(connections, default_lat=40.7, default_lon=-74.0)
+
+
+async def _subscribe(server, socket, connections, cells, lat, lon):
+    """Drive one point-form subscribe message through the handler."""
+    return await server._handle_message(
+        socket, "c1", cells, json.dumps({"type": "subscribe", "lat": lat, "lon": lon})
+    )
+
+
+async def _subscribe_bounds(server, socket, cells, bounds):
+    """Drive one viewport-form subscribe message through the handler."""
+    return await server._handle_message(
+        socket, "c1", cells, json.dumps({"type": "subscribe", "bounds": list(bounds)})
+    )
+
+
+async def test_panning_into_a_new_cell_moves_the_subscription(connections):
+    """The reported bug: without this the poller is only ever asked about the
+    cell chosen at connect time, so a panned map shows empty sky."""
+    server = _server(connections)
+    socket = FakeSocket()
+    cell = snap_to_grid(40.7, -74.0)
+    cells = {cell.key}
+    connections.put_connection(Connection("c1", cell.key, 1.0))
+
+    moved = await _subscribe(server, socket, connections, cells, 51.5, -0.1)
+
+    assert moved == {"50_-5"}
+    assert sorted(connections.list_active_cells()) == ["50_-5"]
+    assert socket.sent[-1]["type"] == "subscribed"
+    assert socket.sent[-1]["region_cell"] == "50_-5"
+
+
+async def test_the_old_cell_stops_being_polled(connections):
+    """Otherwise every pan permanently adds an upstream request per cycle."""
+    server = _server(connections)
+    cell = snap_to_grid(40.7, -74.0)
+    cells = {cell.key}
+    connections.put_connection(Connection("c1", cell.key, 1.0))
+
+    await _subscribe(server, FakeSocket(), connections, cells, 51.5, -0.1)
+
+    assert cell.key not in connections.list_active_cells()
+    assert connections.count_connections() == 1  # moved, not duplicated
+
+
+async def test_panning_within_the_same_cell_is_a_no_op(connections):
+    """The client re-sends on every move because it cannot know where the
+    boundaries are; the server is what makes that cheap."""
+    server = _server(connections)
+    socket = FakeSocket()
+    cell = snap_to_grid(40.7, -74.0)
+    cells = {cell.key}
+    connections.put_connection(Connection("c1", cell.key, 1.0))
+
+    same = await _subscribe(server, socket, connections, cells, 42.0, -72.0)
+
+    assert same == cells
+    assert socket.sent == []  # no needless round trip
+    assert connections.count_connections() == 1
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not json", "[]", "null", '{"type":"nonsense"}', '{"type":"subscribe"}',
+        '{"type":"subscribe","lat":"x","lon":0}', '{"type":"subscribe","lat":999,"lon":0}',
+        '{"type":"subscribe","lat":null,"lon":null}',
+    ],
+)
+async def test_a_bad_message_leaves_the_subscription_untouched(connections, raw):
+    """A client sending nonsense keeps the aircraft it already has."""
+    server = _server(connections)
+    socket = FakeSocket()
+    cell = snap_to_grid(40.7, -74.0)
+    cells = {cell.key}
+    connections.put_connection(Connection("c1", cell.key, 1.0))
+
+    unchanged = await server._handle_message(socket, "c1", cells, raw)
+
+    assert unchanged == cells
+    assert list(connections.list_active_cells()) == [cell.key]
+    assert socket.sent == []
+
+
+async def test_poller_follows_the_client_to_the_new_cell(connections):
+    """End to end: resubscribing is what makes the new sky get polled at all."""
+    stream = LocalStream()
+    client = StubClient([PLANE])
+    poller = _poller(client, connections, stream)
+    server = _server(connections)
+    cell = snap_to_grid(40.7, -74.0)
+    cells = {cell.key}
+    connections.put_connection(Connection("c1", cell.key, 1.0))
+
+    await poller.poll_once()
+    first = client.calls[0]
+
+    await _subscribe(server, FakeSocket(), connections, cells, 51.5, -0.1)
+    await poller.poll_once()
+
+    assert len(client.calls) == 2
+    assert client.calls[1] != first
+    assert client.calls[1][:2] == (52.5, -2.5)  # centre of cell 50_-5
+
+
+async def test_a_wide_viewport_subscribes_to_every_cell_it_spans(connections):
+    """The zoomed-out complaint: a viewport spanning four cells used to get
+    one cell's aircraft, so most of the map sat empty."""
+    server = _server(connections)
+    socket = FakeSocket()
+    start = snap_to_grid(40.7, -74.0)
+    cells = {start.key}
+    connections.put_connection(Connection("c1", start.key, 1.0))
+
+    updated = await _subscribe_bounds(server, socket, cells, (38.0, -76.0, 47.0, -68.0))
+
+    assert len(updated) == 9
+    assert sorted(connections.list_active_cells()) == sorted(updated)
+    assert len(socket.sent[-1]["cells"]) == 9
+
+
+async def test_the_poller_fetches_every_subscribed_cell(connections):
+    """Coverage only counts if the cells are actually polled."""
+    stream = LocalStream()
+    client = StubClient([PLANE])
+    server = _server(connections)
+    start = snap_to_grid(40.7, -74.0)
+    connections.put_connection(Connection("c1", start.key, 1.0))
+
+    updated = await _subscribe_bounds(server, FakeSocket(), {start.key}, (38.0, -76.0, 47.0, -68.0))
+    await _poller(client, connections, stream).poll_once()
+
+    assert len(client.calls) == len(updated) == 9
+
+
+async def test_the_client_is_told_when_coverage_is_capped(connections):
+    """Otherwise a capped viewport is indistinguishable from a dead feed."""
+    server = LocalWebSocketServer(connections, 40.7, -74.0, max_cells=4)
+    socket = FakeSocket()
+    start = snap_to_grid(40.7, -74.0)
+    connections.put_connection(Connection("c1", start.key, 1.0))
+
+    await _subscribe_bounds(server, socket, {start.key}, (-60.0, -170.0, 60.0, 170.0))
+
+    assert socket.sent[-1]["truncated"] is True
+    assert socket.sent[-1]["max_cells"] == 4
+    assert len(socket.sent[-1]["cells"]) == 4
+
+
+async def test_a_narrow_viewport_is_not_reported_as_capped(connections):
+    server = LocalWebSocketServer(connections, 40.7, -74.0, max_cells=9)
+    socket = FakeSocket()
+    # Start elsewhere, so moving here is a real change and does send a reply.
+    start = snap_to_grid(0.0, 0.0)
+    connections.put_connection(Connection("c1", start.key, 1.0))
+
+    updated = await _subscribe_bounds(server, socket, {start.key}, (41.0, -74.0, 42.0, -73.0))
+
+    assert updated == {"40_-75"}
+    assert socket.sent[-1]["truncated"] is False
+
+
+async def test_shrinking_the_viewport_releases_the_cells_it_left(connections):
+    """Otherwise every zoom-out permanently adds requests to every poll cycle."""
+    server = _server(connections)
+    start = snap_to_grid(40.7, -74.0)
+    connections.put_connection(Connection("c1", start.key, 1.0))
+
+    wide = await _subscribe_bounds(server, FakeSocket(), {start.key}, (38.0, -76.0, 47.0, -68.0))
+    assert len(wide) == 9
+
+    narrow = await _subscribe_bounds(server, FakeSocket(), wide, (41.0, -74.0, 42.0, -73.0))
+
+    assert narrow == {"40_-75"}
+    assert sorted(connections.list_active_cells()) == ["40_-75"]
+    assert connections.count_connections() == 1
+
+
+async def test_disconnect_releases_every_cell(connections):
+    """A multi-cell client that vanishes must not leave the poller working."""
+    server = _server(connections)
+    start = snap_to_grid(40.7, -74.0)
+    connections.put_connection(Connection("c1", start.key, 1.0))
+    cells = await _subscribe_bounds(server, FakeSocket(), {start.key}, (38.0, -76.0, 47.0, -68.0))
+
+    for key in cells:
+        connections.delete_connection("c1", key)
+
+    assert list(connections.list_active_cells()) == []
+
+
+async def test_subscribing_wakes_the_scheduler(connections):
+    """Without the wake, sky the user just panned to stays blank for a full
+    interval, which reads as broken rather than as pending."""
+    woken = []
+    server = LocalWebSocketServer(connections, 40.7, -74.0, on_subscribe=lambda: woken.append(1))
+    start = snap_to_grid(40.7, -74.0)
+    connections.put_connection(Connection("c1", start.key, 1.0))
+
+    await _subscribe_bounds(server, FakeSocket(), {start.key}, (38.0, -76.0, 47.0, -68.0))
+    assert len(woken) == 1
+
+    # A no-op resubscribe must not wake it — a drag inside one cell would
+    # otherwise poll on every mouse-up.
+    await _subscribe_bounds(server, FakeSocket(), {"40_-75"}, (41.0, -74.0, 42.0, -73.0))
+    assert len(woken) == 1
+
+
+async def test_scheduler_polls_early_when_woken(connections):
+    """The wake shortens the sleep rather than being merely recorded."""
+    connections.put_connection(Connection("c1", "40_-75", 1.0))
+
+    class CountingPoller:
+        def __init__(self):
+            self.polls = 0
+
+        async def poll_once(self):
+            self.polls += 1
+            return 0
+
+    poller = CountingPoller()
+    scheduler = LocalScheduler(poller, connections, interval_s=3600)  # never on its own
+    task = asyncio.create_task(scheduler.run())
+    await asyncio.sleep(0)
+    assert poller.polls == 1  # the immediate first tick
+
+    scheduler.wake()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert poller.polls == 2  # woken, not waited out
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

@@ -1,6 +1,8 @@
 """Tests for the .env parser and the required-variable check.
 
-`config` resolves credentials at import, so these are set before importing it.
+airplanes.live needs no credentials, so `config` no longer requires anything at
+import time and this module can import it directly — the env priming the
+OpenSky client needed is gone with it.
 """
 
 from __future__ import annotations
@@ -9,10 +11,7 @@ import os
 
 import pytest
 
-os.environ.setdefault("OPENSKY_CLIENT_ID", "test-id")
-os.environ.setdefault("OPENSKY_CLIENT_SECRET", "test-secret")
-
-import config  # noqa: E402  — must follow the env setup above
+import config
 
 
 def test_parses_pairs_comments_and_quotes(tmp_path, monkeypatch):
@@ -67,3 +66,12 @@ def test_require_rejects_unset(monkeypatch):
 def test_require_returns_value(monkeypatch):
     monkeypatch.setenv("SOME_KEY", "  present  ")
     assert config.require("SOME_KEY") == "present"
+
+
+def test_import_needs_no_credentials():
+    """Importing config with an empty environment must not raise.
+
+    The OpenSky migration's user-visible win: `python run_local.py` runs on a
+    clean checkout with no .env at all.
+    """
+    assert not any(name.startswith("OPENSKY_") for name in vars(config))

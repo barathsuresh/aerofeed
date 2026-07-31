@@ -63,12 +63,50 @@
   @keyframes pulse { 50% { opacity: 0.35; } }
 
   #cell { margin-top: 6px; font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+  /* Coverage capped: the viewport is wider than the cells being polled. */
+  #cell.capped { color: var(--pending); }
 
   /* Plane marker: an SVG pointing north, rotated to the reported heading. */
   .plane { width: 22px; height: 22px; transition: transform 0.4s linear; }
   .plane svg { width: 100%; height: 100%; display: block; }
   .plane.air svg   { fill: #58a6ff; stroke: #0d1117; stroke-width: 12; }
   .plane.ground svg { fill: #8b949e; stroke: #0d1117; stroke-width: 12; }
+  .plane.military svg { fill: #3fb950; }
+
+  /* Position provenance. A stale or estimated fix must never look like a live
+     one — these aircraft are real but their coordinates are not current. */
+  .plane.stale     { opacity: 0.55; }
+  .plane.stale svg { fill: #d29922; stroke-dasharray: 20 10; }
+  .plane.estimated     { opacity: 0.4; }
+  .plane.estimated svg { fill: #8b949e; stroke: #d29922; }
+
+  /* Outranks every other styling: fill plus a pulse that survives at a glance
+     across a crowded map. The animation is on the svg, not the wrapper — the
+     wrapper's transform carries the heading rotation and must not be clobbered. */
+  .plane.emergency { opacity: 1; }
+  .plane.emergency svg {
+    fill: #f85149 !important;
+    transform-origin: center;
+    /* Distinct name: `pulse` is already taken by the status dot above, and a
+       duplicate @keyframes silently replaces it for every user of that name. */
+    animation: emergency-pulse 1s ease-in-out infinite;
+  }
+  @keyframes emergency-pulse { 50% { transform: scale(1.45); } }
+
+  .badge {
+    display: inline-block; padding: 1px 6px; margin-left: 4px;
+    border-radius: 3px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em; vertical-align: middle;
+  }
+  .badge.mil  { background: #1a4d2e; color: #3fb950; }
+  .badge.warn { background: #4d3800; color: #d29922; }
+  .badge.stop { background: #5c1d1a; color: #f85149; }
+
+  .leaflet-popup-content .sub  { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .leaflet-popup-content .warn {
+    color: #d29922; font-size: 11px; margin-top: 4px;
+    padding: 3px 6px; background: rgba(210, 153, 34, 0.12); border-radius: 3px;
+  }
 
   .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #161b22; color: var(--text); }
   .leaflet-popup-content { margin: 10px 12px; font-size: 13px; }

@@ -1,9 +1,15 @@
 """Decide whether a new state vector is worth pushing to subscribers.
 
-OpenSky re-reports every aircraft in the box each poll whether or not anything
+Upstream re-reports every aircraft in range each poll whether or not anything
 happened. This module is the throttle every fan-out path gates on. Thresholds
 are constants so they can be tuned against real traffic — starting points, not
 truths.
+
+Provider-agnostic by construction: it compares AircraftState, and the client is
+what normalises wire quirks into it. airplanes.live's `alt_baro: "ground"`
+never reaches here — the client turns it into on_ground=True with no altitude,
+so every value compared below is a number or None, and the string-vs-number
+comparison this module would otherwise have to defend against cannot arise.
 """
 
 from __future__ import annotations
@@ -38,8 +44,10 @@ def _crossed_threshold(
 def has_meaningfully_changed(old: Optional[AircraftState], new: AircraftState) -> bool:
     """Report whether `new` differs from `old` enough to notify clients.
 
-    Meaningful means any of: position moved more than POSITION_EPSILON_DEG in
-    lat or lon; altitude changed more than ALTITUDE_EPSILON_M; on_ground flipped.
+    Meaningful means any of: emergency status changed; on_ground flipped; the
+    position source changed (live <-> stale <-> estimated); position moved more
+    than POSITION_EPSILON_DEG in lat or lon; altitude changed more than
+    ALTITUDE_EPSILON_M.
 
     Args:
         old: Last state pushed for this aircraft, or None on first sighting.
@@ -49,18 +57,33 @@ def has_meaningfully_changed(old: Optional[AircraftState], new: AircraftState) -
         True when the update should be propagated.
 
     Note:
-        Ignores callsign, squawk, velocity and vertical rate. Velocity changes
-        on nearly every poll and would defeat the filter. Add a field here only
-        when a client actually renders it.
+        Ignores callsign, velocity, vertical rate and the identity fields
+        (registration, type, description), which are database lookups that do
+        not change in flight. Velocity changes on nearly every poll and would
+        defeat the filter. Squawk is deliberately not compared directly — only
+        the emergency codes within it matter, via is_emergency. Add a field
+        here only when a client actually renders it.
     """
     # First sighting — client has nothing at all. Checked first so nothing below
     # dereferences a None.
     if old is None:
         return True
 
+    # Before everything: an aircraft declaring an emergency, or standing one
+    # down, is the one update that must never be filtered out as insignificant.
+    if old.is_emergency != new.is_emergency:
+        return True
+
     # Before position: a landing rollout can flip the flag while moving less
     # than one epsilon, and it's the most interesting event in a track.
     if old.on_ground != new.on_ground:
+        return True
+
+    # A position that degrades from live to stale, or recovers, changes what
+    # the client should be drawing even when the coordinates barely move —
+    # and a stale position by definition stops moving, so nothing below would
+    # ever catch it.
+    if old.position_source != new.position_source:
         return True
 
     if _crossed_threshold(old.latitude, new.latitude, POSITION_EPSILON_DEG):

@@ -95,3 +95,47 @@ def test_velocity_and_callsign_changes_are_ignored():
     # Velocity moves nearly every poll; filtering on it would defeat the throttle.
     new = state(velocity=250.0, callsign="DLH999", squawk="7000")
     assert has_meaningfully_changed(BASE, new) is False
+
+
+# --- emergency and position provenance ---------------------------------------
+
+
+@pytest.mark.parametrize("squawk", ["7500", "7600", "7700"])
+def test_declaring_an_emergency_is_always_a_change(squawk):
+    """The one update that must never be filtered as insignificant."""
+    calm = state(squawk="1200")
+    alarm = state(squawk=squawk)
+
+    assert has_meaningfully_changed(calm, alarm) is True
+    assert has_meaningfully_changed(alarm, calm) is True  # and standing down
+
+
+def test_declared_emergency_field_also_counts():
+    calm = state(emergency="none")
+    alarm = state(emergency="lifeguard")
+
+    assert has_meaningfully_changed(calm, alarm) is True
+
+
+def test_an_ordinary_squawk_change_is_still_ignored():
+    """Squawk churns on handoff between controllers; only emergencies matter."""
+    assert has_meaningfully_changed(state(squawk="1200"), state(squawk="2412")) is False
+
+
+def test_position_going_stale_is_a_change():
+    """A stale position stops moving by definition, so no other check here
+    would ever catch the transition."""
+    live = state(position_source="live")
+    gone = state(position_source="last_known")
+
+    assert has_meaningfully_changed(live, gone) is True
+    assert has_meaningfully_changed(gone, live) is True
+
+
+def test_identity_fields_do_not_trigger_broadcasts():
+    """Database lookups, not telemetry — they do not change in flight, and a
+    provider backfill must not spam every client."""
+    old = state(registration=None, aircraft_type=None, description=None)
+    new = state(registration="N954JB", aircraft_type="A320", description="AIRBUS A-320")
+
+    assert has_meaningfully_changed(old, new) is False

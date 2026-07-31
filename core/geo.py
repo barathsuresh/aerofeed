@@ -1,6 +1,6 @@
 """Snap a coordinate to the region cell containing it.
 
-The pipeline polls OpenSky per cell, not per client, so a thousand subscribers
+The pipeline polls upstream per cell, not per client, so a thousand subscribers
 watching the same sky cost one upstream request.
 
 Known tradeoff (documented, not fixed): snapping is a hard partition. Two points
@@ -18,6 +18,9 @@ from .models import RegionCell
 
 LAT_MIN, LAT_MAX = -90.0, 90.0
 LON_MIN, LON_MAX = -180.0, 180.0
+
+# One minute of latitude, by definition of the nautical mile.
+NM_PER_DEGREE = 60.0
 
 
 def _format_edge(value: float | int) -> str:
@@ -70,6 +73,108 @@ def snap_to_grid(lat: float, lon: float, grid_size_degrees: float = 5) -> Region
         lamax=float(lamax),
         lomax=float(lomax),
     )
+
+
+def cells_for_bounds(
+    lamin: float,
+    lomin: float,
+    lamax: float,
+    lomax: float,
+    grid_size_degrees: float = 5,
+    max_cells: int = 9,
+) -> list[RegionCell]:
+    """Every cell overlapping a viewport, nearest the centre first.
+
+    A zoomed-out map spans more than one cell, and a client subscribed to one
+    cell sees one cell's worth of aircraft however far out it zooms — the rest
+    of the sky is real, just never polled.
+
+    Ordering is by distance from the viewport centre so that truncation drops
+    the corners rather than an arbitrary slice: what remains is always a
+    contiguous blob around where the user is actually looking.
+
+    Args:
+        lamin, lomin, lamax, lomax: Viewport edges in decimal degrees.
+        grid_size_degrees: Must match the poller's grid.
+        max_cells: Hard cap. Each cell is one upstream request per poll cycle
+            and the poller paces them 1.1s apart, so an uncapped world view
+            would take longer to poll than the interval between polls.
+
+    Returns:
+        Between 1 and `max_cells` cells. Never empty — a degenerate viewport
+        still resolves to the cell containing it.
+
+    Raises:
+        ValueError: Non-positive grid size, max_cells below 1, or coordinates
+            out of range.
+    """
+    if max_cells < 1:
+        raise ValueError(f"max_cells must be at least 1, got {max_cells!r}")
+
+    # Clamp before snapping: a world-view map reports edges past the poles, and
+    # Leaflet happily reports longitudes outside +-180 once you scroll sideways.
+    lamin, lamax = max(LAT_MIN, min(lamin, lamax)), min(LAT_MAX, max(lamin, lamax))
+    lomin, lomax = max(LON_MIN, min(lomin, lomax)), min(LON_MAX, max(lomin, lomax))
+
+    origin = snap_to_grid(lamin, lomin, grid_size_degrees)
+    centre_lat = (lamin + lamax) / 2.0
+    centre_lon = (lomin + lomax) / 2.0
+
+    cells: dict[str, RegionCell] = {}
+    lat = origin.lamin
+    while lat <= lamax and lat < LAT_MAX:
+        lon = origin.lomin
+        while lon <= lomax and lon < LON_MAX:
+            cell = snap_to_grid(lat, lon, grid_size_degrees)
+            cells[cell.key] = cell
+            lon += grid_size_degrees
+        lat += grid_size_degrees
+
+    def distance_from_centre(cell: RegionCell) -> float:
+        cell_lat = (cell.lamin + cell.lamax) / 2.0
+        cell_lon = (cell.lomin + cell.lomax) / 2.0
+        return math.hypot(cell_lat - centre_lat, cell_lon - centre_lon)
+
+    ordered = sorted(cells.values(), key=lambda c: (distance_from_centre(c), c.key))
+    return ordered[:max_cells]
+
+
+def cell_to_point_radius(cell: RegionCell) -> tuple[float, float, float]:
+    """Convert a cell to the (lat, lon, radius_nm) circle that covers it.
+
+    airplanes.live queries a circle, not a box, so the square cell has to be
+    circumscribed. The circle is deliberately the smallest one that contains
+    the whole cell rather than the largest one inside it: over-covering means a
+    client occasionally sees an aircraft just outside its box, while
+    under-covering means a corner of the map is silently always empty.
+
+    Args:
+        cell: The cell to cover.
+
+    Returns:
+        (centre latitude, centre longitude, radius in nautical miles).
+
+    Note:
+        Returns the true circumscribing radius; the client clamps it to the
+        provider's 250 nm limit so this stays pure geometry. A 5-degree grid
+        needs at most ~212 nm, so the clamp only bites if GRID_SIZE_DEGREES is
+        raised past ~6 degrees — at which point cells genuinely stop being
+        coverable in one request and would need splitting rather than clamping.
+    """
+    centre_lat = (cell.lamin + cell.lamax) / 2.0
+    centre_lon = (cell.lomin + cell.lomax) / 2.0
+
+    half_height_nm = (cell.lamax - cell.lamin) / 2.0 * NM_PER_DEGREE
+
+    # A degree of longitude is widest at the equator, so scale by whichever
+    # edge sits closer to it. Using the centre latitude would under-cover the
+    # cell's equator-facing corners — exactly the silent data hole above.
+    widest_lat = min(abs(cell.lamin), abs(cell.lamax))
+    half_width_nm = (
+        (cell.lomax - cell.lomin) / 2.0 * NM_PER_DEGREE * math.cos(math.radians(widest_lat))
+    )
+
+    return centre_lat, centre_lon, math.hypot(half_height_nm, half_width_nm)
 
 
 def cell_from_key(key: str, grid_size_degrees: float = 5) -> RegionCell:

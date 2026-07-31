@@ -1,12 +1,23 @@
 """Core domain models. Data only — no persistence, transport or cloud concerns.
 
-OpenSky nulls every field except icao24, so almost everything here is Optional.
+Upstream providers null or omit every field except icao24, so almost everything
+here is Optional.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
+# How a state's coordinates were obtained, worst case last.
+POSITION_LIVE = "live"  # a current fix from the aircraft
+POSITION_LAST_KNOWN = "last_known"  # real fix, but stale (provider's lastPosition)
+POSITION_ESTIMATED = "estimated"  # inferred from the receiver, not from the aircraft
+
+# Mode A codes that mean an emergency regardless of what the ADS-B emergency
+# field says: hijack, radio failure, general emergency. Universal, not
+# provider-specific.
+EMERGENCY_SQUAWKS = frozenset({"7500", "7600", "7700"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,10 +42,41 @@ class AircraftState:
     geo_altitude: Optional[float] = None  # metres, GNSS
     squawk: Optional[str] = None
 
+    # --- identity, from the provider's aircraft database ---------------------
+    # Not transmitted by the aircraft; looked up from its address. Absent for
+    # anything not in the database, which is why these stay Optional.
+    registration: Optional[str] = None  # tail number, e.g. "LZ-LAJ"
+    aircraft_type: Optional[str] = None  # ICAO type code, e.g. "A320"
+    description: Optional[str] = None  # human-readable, e.g. "AIRBUS A-320"
+    category: Optional[str] = None  # ADS-B emitter class, A0-D7
+    military: Optional[bool] = None
+
+    # --- provenance ----------------------------------------------------------
+    # How the position was obtained, which is not a detail: an aircraft with a
+    # 50-minute-old position must not be drawn like one reporting live, and
+    # without this the two are indistinguishable downstream.
+    data_source: Optional[str] = None  # provider's `type`: adsb_icao, mode_s, mlat, ...
+    position_source: Optional[str] = None  # one of POSITION_* below
+
+    emergency: Optional[str] = None  # none, general, lifeguard, minfuel, nordo, ...
+
     @property
     def has_position(self) -> bool:
         """True when both coordinates are present, i.e. the state is mappable."""
         return self.latitude is not None and self.longitude is not None
+
+    @property
+    def is_emergency(self) -> bool:
+        """True when the aircraft is declaring or squawking an emergency.
+
+        Two independent channels: the ADS-B emergency/priority field, and the
+        legacy Mode A squawks that predate it. An aircraft may set either, so
+        checking one alone misses real emergencies.
+        """
+        return (
+            self.emergency not in (None, "", "none")
+            or self.squawk in EMERGENCY_SQUAWKS
+        )
 
     @property
     def altitude(self) -> Optional[float]:
@@ -61,7 +103,12 @@ class RegionCell:
 
     @property
     def bbox(self) -> Tuple[float, float, float, float]:
-        """Cell as (lamin, lomin, lamax, lomax) — OpenSky's parameter order."""
+        """Cell as (lamin, lomin, lamax, lomax).
+
+        The current provider queries point+radius (see geo.cell_to_point_radius),
+        so nothing in the poll path reads this; it stays because the cell's
+        extent is the definition of the cell, independent of how it's queried.
+        """
         return (self.lamin, self.lomin, self.lamax, self.lomax)
 
 

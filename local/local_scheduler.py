@@ -31,6 +31,19 @@ class LocalScheduler:
         self._poller = poller
         self._store = connection_store
         self._interval = interval_s
+        self._wake = asyncio.Event()
+
+    def wake(self) -> None:
+        """Poll on the next loop instead of waiting out the interval.
+
+        Called when a client subscribes to sky nobody was watching. Without it
+        a user who pans somewhere new stares at an empty map for up to a full
+        interval, which reads as broken rather than as pending.
+
+        Safe to call repeatedly: the event coalesces, so a drag across five
+        cells still produces one extra poll rather than five.
+        """
+        self._wake.set()
 
     async def run(self) -> None:
         """Loop until cancelled."""
@@ -48,4 +61,11 @@ class LocalScheduler:
                 # pipeline with it and is silent about it. Log and tick again.
                 logger.exception("poll tick failed; continuing")
 
-            await asyncio.sleep(self._interval)
+            # Sleep the interval, but cut it short if someone subscribes. The
+            # event is cleared after waiting, not before: a wake arriving
+            # during the poll above must still shorten the sleep that follows.
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=self._interval)
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+            self._wake.clear()

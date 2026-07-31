@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
-from core.opensky_client import OpenSkyClient  # noqa: E402
+from core.airplanes_live_client import AirplanesLiveClient  # noqa: E402
 from local.local_scheduler import LocalScheduler  # noqa: E402
 from local.local_stream import LocalStream  # noqa: E402
 from local.local_ws_server import LocalWebSocketServer  # noqa: E402
@@ -50,15 +50,22 @@ async def main() -> None:
         default_lat=config.DEFAULT_LAT,
         default_lon=config.DEFAULT_LON,
         grid_size_degrees=config.GRID_SIZE_DEGREES,
+        max_cells=config.MAX_CELLS_PER_CLIENT,
     )
     processor = Processor(position_store, broadcast=ws_server.broadcast)
     poller = Poller(
-        OpenSkyClient(config.OPENSKY_CLIENT_ID, config.OPENSKY_CLIENT_SECRET),
+        AirplanesLiveClient(),
         connection_store,
         stream,
         grid_size_degrees=config.GRID_SIZE_DEGREES,
     )
     scheduler = LocalScheduler(poller, connection_store, config.POLL_INTERVAL_S)
+
+    # Assigned rather than passed: the server needs the scheduler and the
+    # scheduler needs the poller which needs the store, so the cycle has to be
+    # closed after construction. Wakes the poller on every new subscription, so
+    # sky the user just panned to is fetched now instead of at the next tick.
+    ws_server.on_subscribe = scheduler.wake
 
     # db.close() must outlive the server: closing the socket server cancels the
     # live connection handlers, whose cleanup deregisters them from the store.

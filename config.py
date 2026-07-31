@@ -1,8 +1,8 @@
-"""Credential and setting resolution. Deliberately outside `core/`.
+"""Setting resolution. Deliberately outside `core/`.
 
-`core` takes its credentials as arguments and knows nothing about where they
-come from; this module is the one place that reads the environment, so the
-domain logic stays testable with literal strings.
+`core` takes its settings as arguments and knows nothing about where they come
+from; this module is the one place that reads the environment, so the domain
+logic stays testable with literal values.
 
 Resolution order: real environment first, `.env` second. Real environment wins
 so a deployed platform's configured vars are never shadowed by a stray `.env`
@@ -46,14 +46,13 @@ def require(name: str) -> str:
 
 load_env_file()
 
-# Resolved at import so a misconfigured run dies at startup with a clear
-# message, rather than on the first poll. Never log these.
-OPENSKY_CLIENT_ID = require("OPENSKY_CLIENT_ID")
-OPENSKY_CLIENT_SECRET = require("OPENSKY_CLIENT_SECRET")
+# airplanes.live needs no credentials, so nothing is required at import any
+# more. `require` stays for the next setting that is genuinely mandatory —
+# deleting and restoring it is more churn than leaving eight lines in place.
 
 # --- Local pipeline settings -------------------------------------------------
-# Defaults are chosen so `python run_local.py` works with nothing but the two
-# credentials set. Every value is env-overridable for experimentation.
+# Defaults are chosen so `python run_local.py` works with no configuration at
+# all. Every value is env-overridable for experimentation.
 
 DB_PATH = Path(os.environ.get("AEROFEED_DB_PATH", "local.db"))
 
@@ -62,8 +61,9 @@ WS_PORT = int(os.environ.get("AEROFEED_WS_PORT", "8765"))
 
 GRID_SIZE_DEGREES = float(os.environ.get("AEROFEED_GRID_SIZE", "5"))
 
-# Local cadence, tightened for iteration speed. Production runs at 60s to stay
-# inside OpenSky's credit budget; see local_scheduler for the full note.
+# Local cadence, tightened for iteration speed. The binding constraint is now
+# airplanes.live's 1 req/s and one request per active cell, which the poller
+# paces; see local_scheduler for the full note.
 POLL_INTERVAL_S = float(os.environ.get("AEROFEED_POLL_INTERVAL", "15"))
 
 # Fallback subscription point for clients that pass no lat/lon override.
@@ -71,3 +71,8 @@ POLL_INTERVAL_S = float(os.environ.get("AEROFEED_POLL_INTERVAL", "15"))
 # New York has dense, near-continuous traffic, which makes for a live demo.
 DEFAULT_LAT = float(os.environ.get("AEROFEED_DEFAULT_LAT", "40.7"))
 DEFAULT_LON = float(os.environ.get("AEROFEED_DEFAULT_LON", "-74.0"))
+
+# Most region cells one client may cover at once. Each cell is one upstream
+# request and the poller paces them 1.1s apart, so a full cycle takes about
+# (N-1) * 1.1s — this must stay well under POLL_INTERVAL_S or ticks overlap.
+MAX_CELLS_PER_CLIENT = int(os.environ.get("AEROFEED_MAX_CELLS", "9"))
