@@ -70,3 +70,25 @@ def snap_to_grid(lat: float, lon: float, grid_size_degrees: float = 5) -> Region
         lamax=float(lamax),
         lomax=float(lomax),
     )
+
+
+def cell_from_key(key: str, grid_size_degrees: float = 5) -> RegionCell:
+    """Rebuild a RegionCell from its key.
+
+    The poller reads bare cell keys back out of the connection store and needs
+    the bounding box to query with. Storing the box alongside every connection
+    would duplicate what the key already encodes.
+
+    Must be called with the same grid size that produced the key — a mismatch
+    silently yields a different box, so the grid size lives in one config value.
+
+    Raises:
+        ValueError: If the key is not a well-formed "<lamin>_<lomin>" pair.
+    """
+    lat_text, _, lon_text = key.partition("_")
+    try:
+        # Round-trip through snap_to_grid so the box and the key are always
+        # produced by the same code path and cannot drift apart.
+        return snap_to_grid(float(lat_text), float(lon_text), grid_size_degrees)
+    except ValueError as exc:
+        raise ValueError(f"malformed region cell key: {key!r}") from exc

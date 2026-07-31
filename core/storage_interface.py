@@ -41,6 +41,14 @@ class ConnectionStore(Protocol):
         """Connections subscribed to `cell_key`; empty iterable, never None."""
         ...
 
+    def list_active_cells(self) -> Iterable[str]:
+        """Distinct cell keys with at least one subscriber.
+
+        Drives the poll loop: exactly these cells get an upstream request, so
+        an empty result means no OpenSky calls at all.
+        """
+        ...
+
     def put_connection(self, connection: Connection) -> None:
         """Register a subscription, replacing any with the same id and cell."""
         ...

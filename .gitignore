@@ -5,6 +5,11 @@
 *.tfvars
 *.pem
 
+# Local pipeline state — regenerated on every run.
+local.db
+*.db-journal
+*.db-wal
+
 # Python
 __pycache__/
 *.py[cod]

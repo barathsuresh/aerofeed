@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.geo import snap_to_grid
+from core.geo import cell_from_key, snap_to_grid
 
 
 def test_snaps_to_south_west_corner():
@@ -56,6 +56,23 @@ def test_out_of_range_coordinates_raise(lat, lon):
 def test_non_positive_grid_size_raises():
     with pytest.raises(ValueError):
         snap_to_grid(0.0, 0.0, grid_size_degrees=0)
+
+
+@pytest.mark.parametrize(
+    "lat, lon",
+    [(42.3, -73.1), (-33.9, -73.1), (0.0, 0.0), (51.5, 0.1), (90.0, 180.0)],
+)
+def test_cell_from_key_round_trips(lat, lon):
+    # The poller rebuilds cells from bare keys; a lossy round trip would send
+    # it querying a different patch of sky than the client subscribed to.
+    cell = snap_to_grid(lat, lon)
+    assert cell_from_key(cell.key) == cell
+
+
+@pytest.mark.parametrize("key", ["", "nonsense", "40", "40_", "_-75", "a_b"])
+def test_cell_from_key_rejects_malformed_keys(key):
+    with pytest.raises(ValueError):
+        cell_from_key(key)
 
 
 def test_neighbouring_points_across_a_boundary_land_in_different_cells():

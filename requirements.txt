@@ -1,5 +1,10 @@
-# Runtime. No AWS SDK in this phase by design — core stays framework-agnostic.
+# Runtime. No AWS SDK by design — core/ stays framework-agnostic and the local
+# pipeline substitutes SQLite, asyncio.Queue and a websockets server for
+# DynamoDB, Kinesis and API Gateway.
 requests>=2.31,<3
+websockets>=13,<18
+python-dotenv>=1.0,<2
 
 # Dev/test.
 pytest>=8,<10
+pytest-asyncio>=0.23,<2
