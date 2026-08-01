@@ -51,6 +51,7 @@ async def main() -> None:
         default_lon=config.DEFAULT_LON,
         grid_size_degrees=config.GRID_SIZE_DEGREES,
         max_cells=config.MAX_CELLS_PER_CLIENT,
+        position_store=position_store,
     )
     processor = Processor(position_store, broadcast=ws_server.broadcast)
     poller = Poller(

@@ -7,7 +7,13 @@ import math
 import pytest
 
 from core.airplanes_live_client import MAX_RADIUS_NM
-from core.geo import cell_from_key, cell_to_point_radius, cells_for_bounds, snap_to_grid
+from core.geo import (
+    DEFAULT_MAX_CELLS,
+    cell_from_key,
+    cell_to_point_radius,
+    cells_for_bounds,
+    snap_to_grid,
+)
 
 
 def test_snaps_to_south_west_corner():
@@ -157,8 +163,11 @@ def test_a_viewport_inside_one_cell_gives_one_cell():
 
 
 def test_a_wide_viewport_gives_every_cell_it_touches():
-    """The zoomed-out bug: one cell of aircraft in a viewport spanning four."""
-    cells = cells_for_bounds(38.0, -76.0, 47.0, -68.0)
+    """The zoomed-out bug: one cell of aircraft in a viewport spanning nine.
+
+    Cap lifted deliberately — this is about coverage, not rationing.
+    """
+    cells = cells_for_bounds(38.0, -76.0, 47.0, -68.0, max_cells=99)
     assert {c.key for c in cells} == {"35_-80", "35_-75", "35_-70",
                                       "40_-80", "40_-75", "40_-70",
                                       "45_-80", "45_-75", "45_-70"}
@@ -214,10 +223,18 @@ def test_a_nonsense_cap_is_rejected(max_cells):
 
 
 def test_the_default_cap_fits_inside_the_poll_interval():
-    """9 cells paced 1.1s apart is 8.8s, comfortably under the 15s interval.
+    """A full-cap client's cells must poll in well under one interval.
 
     If the cap ever exceeds this, poll cycles overlap and the feed falls behind
     rather than covering more sky.
     """
     from local.poller import INTER_CALL_DELAY_S
-    assert (9 - 1) * INTER_CALL_DELAY_S < 15.0
+    assert (DEFAULT_MAX_CELLS - 1) * INTER_CALL_DELAY_S < 15.0
+
+
+def test_the_cap_leaves_room_for_several_independent_clients():
+    """The real constraint is upstream, not local: 1 request/second means ~60
+    distinct cells per 60s cycle for the WHOLE service. The cap is what stops
+    one zoomed-out client eating a large share of that."""
+    upstream_budget_per_cycle = 60
+    assert upstream_budget_per_cycle // DEFAULT_MAX_CELLS >= 15

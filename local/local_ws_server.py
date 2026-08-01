@@ -29,8 +29,15 @@ from urllib.parse import parse_qs, urlparse
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from core.geo import cells_for_bounds, snap_to_grid
+from core.geo import DEFAULT_MAX_CELLS, snap_to_grid
 from core.models import Connection
+from core.subscription import (
+    SubscriptionError,
+    apply_subscription,
+    is_subscribe,
+    resolve_cells,
+    subscribed_frame,
+)
 
 from .local_stream import StreamRecord
 
@@ -46,8 +53,9 @@ class LocalWebSocketServer:
         default_lat: float,
         default_lon: float,
         grid_size_degrees: float = 5,
-        max_cells: int = 9,
+        max_cells: int = DEFAULT_MAX_CELLS,
         on_subscribe: Optional[Callable[[], None]] = None,
+        position_store=None,
     ) -> None:
         """Create the server.
 
@@ -63,8 +71,10 @@ class LocalWebSocketServer:
             on_subscribe: Called after a subscription changes. The scheduler
                 uses it to poll immediately instead of leaving a client staring
                 at empty sky until the next tick.
+            position_store: Optional store used to snapshot newly-covered cells.
         """
         self._store = connection_store
+        self._positions = position_store
         self._default_lat = default_lat
         self._default_lon = default_lon
         self._grid = grid_size_degrees
@@ -127,6 +137,7 @@ class LocalWebSocketServer:
         # Tell the client what it actually got. Without this a subscriber has no
         # way to know which patch of sky it is watching.
         await self._send_subscribed(websocket, connection_id, initial)
+        await self._send_snapshot(websocket, initial)
 
         try:
             async for raw in websocket:
@@ -148,46 +159,19 @@ class LocalWebSocketServer:
     def _apply_subscription(
         self, connection_id: str, current: set[str], wanted: list
     ) -> set[str]:
-        """Move a connection's subscription to exactly `wanted`.
+        """Move this connection's subscription to exactly `wanted`.
 
-        Returns:
-            The set of cell keys now subscribed to.
+        Thin wrapper over core.subscription so the deployed Lambda and this
+        server cannot drift apart. `current` comes from the handler coroutine's
+        own state here; the Lambda reads it back from the store.
         """
-        wanted_keys = {cell.key for cell in wanted}
-
-        # Add before removing, so a poll landing mid-swap never sees this
-        # client unsubscribed from sky it is still looking at.
-        for cell in wanted:
-            if cell.key not in current:
-                self._store.put_connection(
-                    Connection(
-                        connection_id=connection_id,
-                        cell_key=cell.key,
-                        connected_at=time.time(),
-                    )
-                )
-        for key in current - wanted_keys:
-            self._store.delete_connection(connection_id, key)
-
-        return wanted_keys
+        return apply_subscription(
+            self._store, connection_id, current, wanted, time.time()
+        )
 
     def _resolve_cells(self, message: dict) -> list:
-        """Work out which cells a subscribe message is asking for.
-
-        Accepts a viewport (`bounds`) or a bare point (`lat`/`lon`). The point
-        form stays supported because it is all a client needs before its map
-        has laid out and reported a size.
-
-        Raises:
-            KeyError, TypeError, ValueError: Message is unusable as either form.
-        """
-        bounds = message.get("bounds")
-        if bounds is not None:
-            lamin, lomin, lamax, lomax = (float(value) for value in bounds)
-            return cells_for_bounds(
-                lamin, lomin, lamax, lomax, self._grid, self._max_cells
-            )
-        return [snap_to_grid(float(message["lat"]), float(message["lon"]), self._grid)]
+        """Cells this subscribe message asks for. See core.subscription."""
+        return resolve_cells(message, self._grid, self._max_cells)
 
     async def _handle_message(
         self, websocket: ServerConnection, connection_id: str, cells: set[str], raw: str
@@ -204,12 +188,12 @@ class LocalWebSocketServer:
             logger.debug("ignoring unparseable message from %s", connection_id)
             return cells
 
-        if not isinstance(message, dict) or message.get("type") != "subscribe":
+        if not is_subscribe(message):
             return cells
 
         try:
             wanted = self._resolve_cells(message)
-        except (KeyError, TypeError, ValueError) as exc:
+        except (SubscriptionError, ValueError) as exc:
             logger.warning("ignoring bad subscribe from %s: %s", connection_id, exc)
             return cells
 
@@ -229,29 +213,34 @@ class LocalWebSocketServer:
             connection_id, len(cells), len(updated), ",".join(sorted(updated)),
         )
         await self._send_subscribed(websocket, connection_id, wanted)
+        await self._send_snapshot(websocket, [cell for cell in wanted if cell.key not in cells])
         return updated
 
     async def _send_subscribed(self, websocket, connection_id: str, cells: list) -> None:
-        """Tell the client exactly which sky it is now receiving.
-
-        `truncated` matters: at a wide zoom the cap bites and the client is
-        seeing part of its viewport. Saying so is the difference between "the
-        sky is empty there" and "nobody asked about that sky".
-        """
+        """Tell the client exactly which sky it is now receiving."""
         await websocket.send(
-            json.dumps(
-                {
-                    "type": "subscribed",
-                    "connection_id": connection_id,
-                    # Kept for clients that only understand a single cell.
-                    "region_cell": cells[0].key,
-                    "bbox": cells[0].bbox,
-                    "cells": [{"key": cell.key, "bbox": cell.bbox} for cell in cells],
-                    "truncated": len(cells) >= self._max_cells,
-                    "max_cells": self._max_cells,
-                }
-            )
+            json.dumps(subscribed_frame(connection_id, cells, self._max_cells))
         )
+
+    async def _send_snapshot(self, websocket, new_cells: list) -> None:
+        """Replay stored aircraft for newly-covered cells, best effort."""
+        if self._positions is None:
+            return
+
+        for cell in new_cells:
+            for state in self._positions.list_positions_in_cell(cell.key):
+                if not state.has_position:
+                    continue
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "aircraft",
+                            "region_cell": cell.key,
+                            "state": asdict(state),
+                            "snapshot": True,
+                        }
+                    )
+                )
 
     async def broadcast(self, record: StreamRecord) -> int:
         """Push a record to every live client subscribed to its cell.

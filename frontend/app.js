@@ -11,7 +11,18 @@
 
 'use strict';
 
-const WS_PORT = 8765;
+// Where to find the WebSocket endpoint. Read at runtime from config.json,
+// which Terraform generates with the deployed API's wss:// URL — so the same
+// bundle works against a local server and against AWS, and a redeployed API
+// changes one generated object rather than this source file.
+const CONFIG_URL = 'config.json';
+
+// Fallback when config.json is absent: the local pipeline, served by
+// `python -m http.server` next to run_local.py.
+const LOCAL_WS_PORT = 8765;
+
+// Resolved during boot, before the first connect().
+let wsUrl = null;
 
 // Fallback subscription point, used when the page URL carries no lat/lon.
 // Matches config.py's default so frontend and backend agree out of the box.
@@ -478,9 +489,30 @@ function setStatus(text, cssClass) {
   el.dot.className = cssClass || '';
 }
 
+/** Load the deployed endpoint, falling back to the local dev server.
+ *
+ * A missing or unparseable config.json is the normal local case, not an error:
+ * run_local.py serves the frontend as plain files with no config generated.
+ */
+async function loadConfig() {
+  try {
+    const response = await fetch(CONFIG_URL, { cache: 'no-store' });
+    if (response.ok) {
+      const config = await response.json();
+      if (config.wsUrl) {
+        console.info('aerofeed: endpoint from config.json', config.apiVersion || '');
+        return config.wsUrl;
+      }
+    }
+  } catch {
+    // Fall through — running locally.
+  }
+  return `ws://${location.hostname || 'localhost'}:${LOCAL_WS_PORT}`;
+}
+
 function connect(point) {
-  const url = `ws://${location.hostname || 'localhost'}:${WS_PORT}/` +
-              `?lat=${encodeURIComponent(point.lat)}&lon=${encodeURIComponent(point.lon)}`;
+  const url = `${wsUrl}/?lat=${encodeURIComponent(point.lat)}` +
+              `&lon=${encodeURIComponent(point.lon)}`;
   setStatus('connecting…', '');
 
   socket = new WebSocket(url);
@@ -567,7 +599,10 @@ document.addEventListener('visibilitychange', () => {
 /* --- boot ------------------------------------------------------------------ */
 
 (async function boot() {
-  const point = await subscriptionPoint();
+  // Endpoint first: connect() needs it, and both lookups are independent so
+  // they overlap rather than adding their latencies together.
+  const [endpoint, point] = await Promise.all([loadConfig(), subscriptionPoint()]);
+  wsUrl = endpoint;
   bootPoint = point;
   el.statusText.textContent = `locating via ${point.source}…`;
   initMap(point);

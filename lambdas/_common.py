@@ -24,6 +24,7 @@ from functools import lru_cache
 import boto3
 
 from aws.dynamo_store import DynamoConnectionStore, DynamoPositionStore
+from core.geo import DEFAULT_MAX_CELLS
 from aws.kinesis_stream import STREAM_NAME, KinesisStream
 
 logger = logging.getLogger()
@@ -34,6 +35,9 @@ logging.getLogger("botocore").setLevel(logging.WARNING)
 # --- configuration -----------------------------------------------------------
 
 GRID_SIZE_DEGREES = float(os.environ.get("AEROFEED_GRID_SIZE", "5"))
+
+# Most cells one client may cover. Defined in core.geo alongside the reasoning.
+MAX_CELLS_PER_CLIENT = int(os.environ.get("AEROFEED_MAX_CELLS", str(DEFAULT_MAX_CELLS)))
 
 # EventBridge Rule driving poller_handler. Disabled while nobody is connected,
 # which is the whole cost argument: no subscribers, no invocations, no upstream

@@ -20,6 +20,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Iterable, Optional
 
+from core.geo import snap_to_grid
 from core.models import AircraftState, Connection
 
 # Field names accepted by the AircraftState constructor. Rows written by an
@@ -30,8 +31,12 @@ _STATE_FIELDS = {f.name for f in fields(AircraftState)}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
     icao24 TEXT PRIMARY KEY,
-    state  TEXT NOT NULL
+    state  TEXT NOT NULL,
+    region_cell TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_positions_region_cell
+    ON positions(region_cell);
 
 CREATE TABLE IF NOT EXISTS connections (
     cell_key      TEXT NOT NULL,
@@ -59,11 +64,27 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return connection
 
 
+def _ensure_position_region_cell(connection: sqlite3.Connection) -> None:
+    """Add region_cell for databases created before snapshot support."""
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(positions)").fetchall()
+    }
+    if "region_cell" not in columns:
+        connection.execute("ALTER TABLE positions ADD COLUMN region_cell TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_positions_region_cell "
+        "ON positions(region_cell)"
+    )
+
+
 class SqlitePositionStore:
     """Last-known state vector per aircraft, satisfying `PositionStore`."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, grid_size_degrees: float = 5) -> None:
         self._db = connection
+        self._grid = grid_size_degrees
+        _ensure_position_region_cell(connection)
 
     def get_position(self, icao24: str) -> Optional[AircraftState]:
         """Last stored state, or None on miss."""
@@ -78,11 +99,36 @@ class SqlitePositionStore:
 
     def put_position(self, state: AircraftState) -> None:
         """Store `state` under its icao24, replacing any prior."""
+        cell = self._region_cell(state)
         self._db.execute(
-            "INSERT INTO positions (icao24, state) VALUES (?, ?) "
-            "ON CONFLICT(icao24) DO UPDATE SET state = excluded.state",
-            (state.icao24, json.dumps(asdict(state))),
+            "INSERT INTO positions (icao24, state, region_cell) VALUES (?, ?, ?) "
+            "ON CONFLICT(icao24) DO UPDATE SET "
+            "state = excluded.state, region_cell = excluded.region_cell",
+            (state.icao24, json.dumps(asdict(state)), cell),
         )
+
+    def list_positions_in_cell(self, cell_key: str, limit: int = 2000) -> list[AircraftState]:
+        """Every stored aircraft currently attributed to `cell_key`."""
+        rows = self._db.execute(
+            "SELECT state FROM positions WHERE region_cell = ? LIMIT ?",
+            (cell_key, limit),
+        ).fetchall()
+        states = []
+        for row in rows:
+            payload = json.loads(row["state"])
+            states.append(
+                AircraftState(**{k: v for k, v in payload.items() if k in _STATE_FIELDS})
+            )
+        return states
+
+    def _region_cell(self, state: AircraftState) -> Optional[str]:
+        """Cell this aircraft sits in, or None when it has no position."""
+        if not state.has_position:
+            return None
+        try:
+            return snap_to_grid(state.latitude, state.longitude, self._grid).key
+        except ValueError:
+            return None
 
 
 class SqliteConnectionStore:

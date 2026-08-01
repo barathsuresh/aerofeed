@@ -28,6 +28,14 @@ class PositionStore(Protocol):
         """Store `state` under its icao24, replacing any prior. Last write wins."""
         ...
 
+    def list_positions_in_cell(self, cell_key: str, limit: int = 2000) -> list[AircraftState]:
+        """Stored aircraft currently attributed to `cell_key`.
+
+        Used for snapshot-on-subscribe so a newly-covered cell can populate
+        immediately instead of waiting for aircraft to move.
+        """
+        ...
+
 
 @runtime_checkable
 class ConnectionStore(Protocol):

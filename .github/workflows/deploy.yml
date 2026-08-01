@@ -1,0 +1,99 @@
+name: Deploy AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - name: Guard branch
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/cloud/aws" ]; then
+            echo "This workflow may only run from refs/heads/cloud/aws; got ${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run phase 1 pytest suite
+        run: python -m pytest
+
+      - name: Package Lambda functions
+        run: scripts/build_package.sh
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=aerofeed/cloud-aws.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform plan
+        run: terraform -chdir=terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        run: terraform -chdir=terraform apply -input=false -auto-approve tfplan
+
+      - name: Read Terraform outputs
+        id: tfout
+        run: |
+          echo "bucket=$(terraform -chdir=terraform output -raw frontend_bucket)" >> "$GITHUB_OUTPUT"
+          echo "distribution_id=$(terraform -chdir=terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+          echo "websocket_url=$(terraform -chdir=terraform output -raw websocket_url)" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_domain=$(terraform -chdir=terraform output -raw cloudfront_domain)" >> "$GITHUB_OUTPUT"
+          echo "site_url=$(terraform -chdir=terraform output -raw site_url)" >> "$GITHUB_OUTPUT"
+
+      - name: Sync frontend
+        run: |
+          aws s3 sync frontend "s3://${{ steps.tfout.outputs.bucket }}" \
+            --delete \
+            --exclude config.json
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.tfout.outputs.distribution_id }}" \
+            --paths "/*"
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## Aerofeed deployment"
+            echo
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- WebSocket URL: \`${{ steps.tfout.outputs.websocket_url }}\`"
+            echo "- CloudFront domain: \`${{ steps.tfout.outputs.cloudfront_domain }}\`"
+            echo "- Site URL: ${{ steps.tfout.outputs.site_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

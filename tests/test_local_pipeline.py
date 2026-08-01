@@ -13,7 +13,7 @@ from dataclasses import replace
 import pytest
 
 from core.airplanes_live_client import MAX_RADIUS_NM
-from core.geo import snap_to_grid
+from core.geo import DEFAULT_MAX_CELLS, snap_to_grid
 from core.models import AircraftState, Connection
 from core.storage_interface import ConnectionStore, PositionStore
 from local.local_stream import LocalStream, StreamRecord
@@ -78,6 +78,18 @@ def test_put_position_overwrites(positions):
     positions.put_position(moved)
 
     assert positions.get_position("a1b2c3").latitude == 41.0
+
+
+def test_positions_can_be_listed_by_region_cell(positions):
+    """Local snapshots use the same cell attribute DynamoDB stores."""
+    london = replace(PLANE, icao24="london", latitude=51.5, longitude=-0.1)
+    unmapped = AircraftState(icao24="nopos")
+    positions.put_position(PLANE)
+    positions.put_position(london)
+    positions.put_position(unmapped)
+
+    assert [state.icao24 for state in positions.list_positions_in_cell("40_-75")] == ["a1b2c3"]
+    assert [state.icao24 for state in positions.list_positions_in_cell("50_-5")] == ["london"]
 
 
 def test_connection_lifecycle(connections):
@@ -465,6 +477,26 @@ async def test_panning_into_a_new_cell_moves_the_subscription(connections):
     assert socket.sent[-1]["region_cell"] == "50_-5"
 
 
+async def test_local_subscribe_sends_snapshot_for_new_cells(connections, positions):
+    """Local and Lambda should both populate a newly-covered cell immediately."""
+    london = replace(PLANE, latitude=51.5, longitude=-0.1)
+    positions.put_position(london)
+    server = LocalWebSocketServer(
+        connections, 40.7, -74.0, position_store=positions
+    )
+    socket = FakeSocket()
+    cell = snap_to_grid(40.7, -74.0)
+    cells = {cell.key}
+    connections.put_connection(Connection("c1", cell.key, 1.0))
+
+    await _subscribe(server, socket, connections, cells, 51.5, -0.1)
+
+    aircraft = [frame for frame in socket.sent if frame["type"] == "aircraft"]
+    assert len(aircraft) == 1
+    assert aircraft[0]["region_cell"] == "50_-5"
+    assert aircraft[0]["snapshot"] is True
+
+
 async def test_the_old_cell_stops_being_polled(connections):
     """Otherwise every pan permanently adds an upstream request per cycle."""
     server = _server(connections)
@@ -549,9 +581,9 @@ async def test_a_wide_viewport_subscribes_to_every_cell_it_spans(connections):
 
     updated = await _subscribe_bounds(server, socket, cells, (38.0, -76.0, 47.0, -68.0))
 
-    assert len(updated) == 9
+    assert len(updated) == DEFAULT_MAX_CELLS
     assert sorted(connections.list_active_cells()) == sorted(updated)
-    assert len(socket.sent[-1]["cells"]) == 9
+    assert len(socket.sent[-1]["cells"]) == DEFAULT_MAX_CELLS
 
 
 async def test_the_poller_fetches_every_subscribed_cell(connections):
@@ -565,7 +597,7 @@ async def test_the_poller_fetches_every_subscribed_cell(connections):
     updated = await _subscribe_bounds(server, FakeSocket(), {start.key}, (38.0, -76.0, 47.0, -68.0))
     await _poller(client, connections, stream).poll_once()
 
-    assert len(client.calls) == len(updated) == 9
+    assert len(client.calls) == len(updated) == DEFAULT_MAX_CELLS
 
 
 async def test_the_client_is_told_when_coverage_is_capped(connections):
@@ -583,7 +615,7 @@ async def test_the_client_is_told_when_coverage_is_capped(connections):
 
 
 async def test_a_narrow_viewport_is_not_reported_as_capped(connections):
-    server = LocalWebSocketServer(connections, 40.7, -74.0, max_cells=9)
+    server = LocalWebSocketServer(connections, 40.7, -74.0, max_cells=DEFAULT_MAX_CELLS)
     socket = FakeSocket()
     # Start elsewhere, so moving here is a real change and does send a reply.
     start = snap_to_grid(0.0, 0.0)
@@ -602,7 +634,7 @@ async def test_shrinking_the_viewport_releases_the_cells_it_left(connections):
     connections.put_connection(Connection("c1", start.key, 1.0))
 
     wide = await _subscribe_bounds(server, FakeSocket(), {start.key}, (38.0, -76.0, 47.0, -68.0))
-    assert len(wide) == 9
+    assert len(wide) == DEFAULT_MAX_CELLS
 
     narrow = await _subscribe_bounds(server, FakeSocket(), wide, (41.0, -74.0, 42.0, -73.0))
 
@@ -666,3 +698,31 @@ async def test_scheduler_polls_early_when_woken(connections):
     assert poller.polls == 2  # woken, not waited out
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_the_server_exposes_the_methods_run_local_wires(connections):
+    """run_local.py calls .serve() and hands .broadcast to the Processor. Neither
+    is reachable from the handler tests, so a refactor can delete them silently —
+    as one did."""
+    server = _server(connections)
+    for name in ("handler", "broadcast", "serve", "_handle_message"):
+        assert callable(getattr(server, name, None)), f"{name} is missing"
+
+
+async def test_broadcast_reaches_only_the_matching_cell(connections):
+    server = _server(connections)
+    sent = []
+
+    class Sock:
+        def __init__(self, tag): self.tag = tag
+        async def send(self, m): sent.append((self.tag, json.loads(m)["state"]["icao24"]))
+
+    connections.put_connection(Connection("here", "40_-75", 1.0))
+    connections.put_connection(Connection("elsewhere", "50_0", 1.0))
+    server._sockets["here"] = Sock("here")
+    server._sockets["elsewhere"] = Sock("elsewhere")
+
+    delivered = await server.broadcast(StreamRecord(PLANE, "40_-75"))
+
+    assert delivered == 1
+    assert sent == [("here", "a1b2c3")]

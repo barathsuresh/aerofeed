@@ -22,6 +22,20 @@ LON_MIN, LON_MAX = -180.0, 180.0
 # One minute of latitude, by definition of the nautical mile.
 NM_PER_DEGREE = 60.0
 
+# Most cells one client may cover at once.
+#
+# The binding constraint is upstream, not local: airplanes.live allows 1
+# request/second, and the poller issues one request per *distinct* cell across
+# all clients. At a 60s cycle that is a hard ceiling of ~60 cells for the whole
+# service, so a single client claiming 9 of them is a sixth of global capacity.
+#
+# 4 covers a 2x2 viewport — a comfortable regional view at zoom 6-7 — and lets
+# ~15 clients watch entirely different parts of the world before the budget is
+# gone. Raise it only alongside the rotation scheduling in
+# docs/poll-scheduling.md, which is what removes the ceiling rather than
+# rationing under it.
+DEFAULT_MAX_CELLS = 4
+
 
 def _format_edge(value: float | int) -> str:
     """Render a cell edge for a key: "40", not "40.0".
@@ -81,7 +95,7 @@ def cells_for_bounds(
     lamax: float,
     lomax: float,
     grid_size_degrees: float = 5,
-    max_cells: int = 9,
+    max_cells: int = DEFAULT_MAX_CELLS,
 ) -> list[RegionCell]:
     """Every cell overlapping a viewport, nearest the centre first.
 

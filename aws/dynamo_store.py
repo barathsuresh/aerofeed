@@ -147,6 +147,53 @@ class DynamoPositionStore:
             **{k: _from_dynamo(v) for k, v in payload.items() if k in _STATE_FIELDS}
         )
 
+    def list_positions_in_cell(self, cell_key: str, limit: int = 2000) -> list[AircraftState]:
+        """Every stored aircraft currently attributed to `cell_key`.
+
+        Serves the snapshot a client gets the moment it subscribes. Without it
+        a newly-connected device waits out a poll cycle and then receives only
+        the aircraft that happened to *move* — the delta filter suppresses the
+        rest until the 60s heartbeat gets to them, so a second device on the
+        same map takes up to two minutes to populate.
+
+        A filtered Scan, not a GSI, and deliberately so. DynamoDB bills
+        FilterExpression after the read, so this costs a full table read — but
+        the table is small (~4k items, ~2.7MB) and subscribes are rare. A GSI
+        on region_cell would instead add 1 WRU to *every* position write, and
+        writes here run ~25M/month: roughly $31/month per polled cell to serve
+        a few hundred snapshots. The scan is about three orders of magnitude
+        cheaper. Revisit past ~50k items or if subscribes become continuous.
+
+        Args:
+            cell_key: Region cell to snapshot.
+            limit: Stop after this many aircraft. A guard, not a page size —
+                one cell holds a few hundred, and an unbounded read on a table
+                that has grown unexpectedly is how a cheap call becomes costly.
+
+        Returns:
+            States with a usable position, newest first is not guaranteed.
+        """
+        states: list[AircraftState] = []
+        kwargs: dict[str, Any] = {
+            "FilterExpression": Key("region_cell").eq(cell_key),
+        }
+        while len(states) < limit:
+            response = self._table.scan(**kwargs)
+            for item in response.get("Items", []):
+                payload = item.get("state")
+                if not isinstance(payload, dict):
+                    continue
+                states.append(
+                    AircraftState(
+                        **{k: _from_dynamo(v) for k, v in payload.items() if k in _STATE_FIELDS}
+                    )
+                )
+            start_key = response.get("LastEvaluatedKey")
+            if not start_key:
+                break
+            kwargs["ExclusiveStartKey"] = start_key
+        return states[:limit]
+
     def put_position(self, state: AircraftState) -> None:
         """Store `state` under its icao24, replacing any prior. Last write wins."""
         item = {

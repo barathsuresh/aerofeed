@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and fill in.
+
+region      = "us-east-1"
+
+# AWS emails a confirmation link on the first apply. Until it is clicked the
+# subscription stays PendingConfirmation and every alarm notifies nobody.
+alarm_email = "you@example.com"
+
+# Bucket names are globally unique; the account id is appended automatically.
+# frontend_bucket_prefix = "aerofeed-frontend"
+
+# Must match the cell keys already stored in DynamoDB. Changing this orphans
+# every live subscription.
+# grid_size_degrees    = 5
+
+# Each cell is one upstream request, paced 1.1s apart by the poller.
+# max_cells_per_client = 9

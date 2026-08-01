@@ -16,6 +16,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from core.geo import DEFAULT_MAX_CELLS
+
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 
 
@@ -72,7 +74,6 @@ POLL_INTERVAL_S = float(os.environ.get("AEROFEED_POLL_INTERVAL", "15"))
 DEFAULT_LAT = float(os.environ.get("AEROFEED_DEFAULT_LAT", "40.7"))
 DEFAULT_LON = float(os.environ.get("AEROFEED_DEFAULT_LON", "-74.0"))
 
-# Most region cells one client may cover at once. Each cell is one upstream
-# request and the poller paces them 1.1s apart, so a full cycle takes about
-# (N-1) * 1.1s — this must stay well under POLL_INTERVAL_S or ticks overlap.
-MAX_CELLS_PER_CLIENT = int(os.environ.get("AEROFEED_MAX_CELLS", "9"))
+# Most region cells one client may cover at once. Defined in core.geo, which
+# owns what the cap means; overridable per deployment.
+MAX_CELLS_PER_CLIENT = int(os.environ.get("AEROFEED_MAX_CELLS", str(DEFAULT_MAX_CELLS)))

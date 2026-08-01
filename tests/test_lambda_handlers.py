@@ -15,11 +15,13 @@ patch the accessor, not a module-level object.
 from __future__ import annotations
 
 import base64
+import json
 from unittest import mock
 
 import pytest
 
 from aws.kinesis_stream import encode
+from core.geo import DEFAULT_MAX_CELLS
 from core.models import AircraftState, Connection
 from local.local_stream import StreamRecord
 
@@ -472,3 +474,243 @@ def test_broadcast_to_an_unwatched_cell_costs_no_api_calls(processor_mod):
     import asyncio
     assert asyncio.run(broadcast(StreamRecord(PLANE, "0_0"))) == 0
     api.post_to_connection.assert_not_called()
+
+
+# --- subscribe ----------------------------------------------------------------
+
+
+@pytest.fixture
+def subscribe_mod():
+    from lambdas import subscribe_handler
+    return subscribe_handler
+
+
+def subscribe_event(body, connection_id="abc"):
+    import json as _json
+    return {
+        "requestContext": {
+            "connectionId": connection_id,
+            "domainName": "xa4h68glz1.execute-api.us-east-1.amazonaws.com",
+            "stage": "prod",
+        },
+        "body": _json.dumps(body) if not isinstance(body, str) else body,
+    }
+
+
+def test_subscribe_widens_coverage_to_the_viewport(subscribe_mod):
+    """The deployed-panning bug: without this route a client keeps its one
+    GeoIP cell forever."""
+    store = FakeConnectionStore({("abc", "40_-75")})
+    api = mock.MagicMock()
+    positions = mock.MagicMock()
+    positions.list_positions_in_cell.return_value = []
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: positions), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        result = subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "bounds": [38.0, -76.0, 47.0, -68.0]}), None
+        )
+
+    assert result == {"statusCode": 200}
+    assert len(store.rows) == DEFAULT_MAX_CELLS
+    assert all(cid == "abc" for cid, _ in store.rows)
+    # The client is told what it actually got.
+    frame = json.loads(api.post_to_connection.call_args.kwargs["Data"])
+    assert frame["type"] == "subscribed"
+    assert len(frame["cells"]) == DEFAULT_MAX_CELLS
+
+
+def test_subscribe_releases_cells_the_client_panned_away_from(subscribe_mod):
+    """Otherwise every pan permanently adds requests to every poll cycle."""
+    store = FakeConnectionStore({("abc", f"40_{lon}") for lon in (-80, -75, -70)})
+    # Strictly inside 50_-5: longitude 0.0 would touch the next cell east.
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: mock.MagicMock(**{"list_positions_in_cell.return_value": []})), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": mock.MagicMock()):
+        subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "bounds": [51.0, -4.0, 52.0, -1.0]}), None
+        )
+
+    assert store.rows == {("abc", "50_-5")}
+
+
+def test_a_move_inside_the_same_cell_costs_nothing(subscribe_mod):
+    """The client re-sends on every map move because it cannot know where the
+    boundaries are; the server is what makes that cheap."""
+    store = FakeConnectionStore({("abc", "40_-75")})
+    api = mock.MagicMock()
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        subscribe_mod.handler(subscribe_event({"type": "subscribe", "lat": 42.0, "lon": -72.0}), None)
+
+    assert store.rows == {("abc", "40_-75")}
+    api.post_to_connection.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [
+    "not json", "{}", '{"type":"other"}', '{"type":"subscribe"}',
+    '{"type":"subscribe","bounds":"nope"}', '{"type":"subscribe","lat":999,"lon":0}',
+])
+def test_a_bad_subscribe_leaves_the_subscription_untouched(subscribe_mod, body):
+    store = FakeConnectionStore({("abc", "40_-75")})
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: mock.MagicMock(**{"list_positions_in_cell.return_value": []})), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": mock.MagicMock()):
+        assert subscribe_mod.handler(subscribe_event(body), None) == {"statusCode": 200}
+
+    assert store.rows == {("abc", "40_-75")}
+
+
+def test_subscribe_without_a_connection_id_is_rejected(subscribe_mod):
+    assert subscribe_mod.handler({"requestContext": {}, "body": "{}"}, None)["statusCode"] == 400
+
+
+def test_the_endpoint_comes_from_the_request_not_the_environment(subscribe_mod):
+    """A route handler already knows which API and stage invoked it."""
+    expected = "https://xa4h68glz1.execute-api.us-east-1.amazonaws.com/prod"
+    assert subscribe_mod.endpoint_from(subscribe_event({"type": "subscribe"})) == expected
+    assert subscribe_mod.endpoint_from({"requestContext": {}}) == ""
+
+
+def test_a_client_that_vanished_mid_subscribe_is_reaped(subscribe_mod):
+    store = FakeConnectionStore({("abc", "40_-75")})
+    api = mock.MagicMock()
+    api.post_to_connection.side_effect = client_error("GoneException")
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: mock.MagicMock(**{"list_positions_in_cell.return_value": []})), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "bounds": [51.0, -4.0, 52.0, -1.0]}), None
+        )
+
+    assert store.rows == set()
+
+
+def test_subscribe_sends_a_snapshot_of_newly_covered_cells(subscribe_mod):
+    """The two-device problem: the state is already stored, so a joining client
+    should not wait a poll cycle and then receive only the aircraft that moved."""
+    store = FakeConnectionStore()
+    api = mock.MagicMock()
+    positions = mock.MagicMock()
+    positions.list_positions_in_cell.return_value = [PLANE]
+
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: positions), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "lat": 51.5, "lon": -0.1}), None
+        )
+
+    frames = [json.loads(c.kwargs["Data"]) for c in api.post_to_connection.call_args_list]
+    aircraft = [f for f in frames if f["type"] == "aircraft"]
+    assert len(aircraft) == 1
+    assert aircraft[0]["state"]["icao24"] == "4caec4"
+    # Flagged so the client can tell a replay from a live update.
+    assert aircraft[0]["snapshot"] is True
+
+
+def test_the_snapshot_covers_only_cells_the_client_did_not_already_have(subscribe_mod):
+    """Re-sending cells it was keeping is pure duplication."""
+    store = FakeConnectionStore({("abc", "40_-75")})
+    positions = mock.MagicMock()
+    positions.list_positions_in_cell.return_value = []
+
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: positions), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": mock.MagicMock()):
+        subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "bounds": [38.0, -76.0, 42.0, -72.0]}), None
+        )
+
+    asked = {c.args[0] for c in positions.list_positions_in_cell.call_args_list}
+    assert "40_-75" not in asked        # already held, not re-sent
+    assert asked                        # but the genuinely new ones were
+
+
+def test_unmappable_aircraft_are_left_out_of_the_snapshot(subscribe_mod):
+    """A stored state with no position would be dropped by the frontend anyway."""
+    store = FakeConnectionStore()
+    api = mock.MagicMock()
+    positions = mock.MagicMock()
+    positions.list_positions_in_cell.return_value = [AircraftState(icao24="nopos")]
+
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: positions), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "lat": 51.5, "lon": -0.1}), None
+        )
+
+    frames = [json.loads(c.kwargs["Data"]) for c in api.post_to_connection.call_args_list]
+    assert not [f for f in frames if f["type"] == "aircraft"]
+
+
+def test_a_snapshot_failure_does_not_undo_the_subscription(subscribe_mod):
+    """Best-effort: the client still populates the slow way."""
+    store = FakeConnectionStore()
+    api = mock.MagicMock()
+    api.post_to_connection.side_effect = client_error("ThrottlingException")
+    positions = mock.MagicMock()
+    positions.list_positions_in_cell.return_value = [PLANE]
+
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: positions), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        result = subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "lat": 51.5, "lon": -0.1}), None
+        )
+
+    assert result == {"statusCode": 200}
+    assert store.rows == {("abc", "50_-5")}
+
+
+def test_a_snapshot_failure_reports_that_the_snapshot_is_incomplete(subscribe_mod):
+    """A throttled snapshot should be visible to the client instead of silent."""
+    store = FakeConnectionStore()
+    api = mock.MagicMock()
+    positions = mock.MagicMock()
+    positions.list_positions_in_cell.return_value = [PLANE]
+
+    calls = []
+
+    def post(ConnectionId, Data):
+        frame = json.loads(Data)
+        calls.append(frame)
+        if frame["type"] == "aircraft":
+            raise client_error("ThrottlingException")
+
+    api.post_to_connection.side_effect = post
+
+    with mock.patch.object(subscribe_mod, "get_connection_store", lambda: store), \
+         mock.patch.object(subscribe_mod, "get_position_store", lambda: positions), \
+         mock.patch.object(subscribe_mod, "get_management_api", lambda e="": api):
+        subscribe_mod.handler(
+            subscribe_event({"type": "subscribe", "lat": 51.5, "lon": -0.1}), None
+        )
+
+    statuses = [frame for frame in calls if frame["type"] == "snapshot_status"]
+    assert statuses == [{"type": "snapshot_status", "sent": 0, "complete": False}]
+
+
+# --- default route ------------------------------------------------------------
+
+
+@pytest.fixture
+def default_mod():
+    from lambdas import default_handler
+    return default_handler
+
+
+def test_default_route_explains_unknown_messages(default_mod):
+    api = mock.MagicMock()
+    with mock.patch.object(default_mod, "get_management_api", lambda e="": api):
+        result = default_mod.handler(subscribe_event({"type": "bogus"}), None)
+
+    assert result == {"statusCode": 200}
+    frame = json.loads(api.post_to_connection.call_args.kwargs["Data"])
+    assert frame["type"] == "error"
+    assert frame["code"] == "unknown_message_type"
+
+
+def test_default_route_requires_a_connection_id(default_mod):
+    assert default_mod.handler({"requestContext": {}}, None)["statusCode"] == 400

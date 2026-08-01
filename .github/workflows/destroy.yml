@@ -1,0 +1,72 @@
+name: Destroy AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - name: Guard branch
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/cloud/aws" ]; then
+            echo "This workflow may only run from refs/heads/cloud/aws; got ${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=aerofeed/cloud-aws.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform destroy plan
+        run: terraform -chdir=terraform plan -destroy -input=false -out=destroy.tfplan
+
+      - name: Terraform destroy apply
+        run: terraform -chdir=terraform apply -input=false -auto-approve destroy.tfplan
+
+      - name: Delete leftover Lambda log groups
+        run: |
+          for group in $(aws logs describe-log-groups \
+            --region "$AWS_REGION" \
+            --log-group-name-prefix /aws/lambda/aerofeed \
+            --query 'logGroups[].logGroupName' \
+            --output text); do
+            aws logs delete-log-group --region "$AWS_REGION" --log-group-name "$group"
+          done
+
+      - name: Destroy summary
+        run: |
+          {
+            echo "## Aerofeed destroy"
+            echo
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Terraform destroy completed."
+            echo "- Leftover \`/aws/lambda/aerofeed*\` log groups deleted."
+          } >> "$GITHUB_STEP_SUMMARY"

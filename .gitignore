@@ -9,7 +9,7 @@
 local.db
 *.db-journal
 *.db-wal
-
+.build/
 # Python
 __pycache__/
 *.py[cod]
