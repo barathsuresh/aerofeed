@@ -14,6 +14,13 @@ data "aws_caller_identity" "current" {}
 
 locals {
   repo_subject = "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${var.github_branch}"
+
+  # GitHub can issue the subject with immutable numeric ids appended to the owner
+  # and repo names. Accept that form too when the ids are supplied.
+  repo_subject_with_ids = "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/${var.github_branch}"
+
+  repo_subjects = var.github_owner_id != "" && var.github_repo_id != "" ? [local.repo_subject, local.repo_subject_with_ids] : [local.repo_subject]
+
   tags = {
     project   = "aerofeed"
     managedby = "terraform"
@@ -91,7 +98,7 @@ data "aws_iam_policy_document" "github_actions_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [local.repo_subject]
+      values   = local.repo_subjects
     }
   }
 }

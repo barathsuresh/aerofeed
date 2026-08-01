@@ -14,6 +14,18 @@ variable "github_repo" {
   default     = "aerofeed"
 }
 
+variable "github_owner_id" {
+  description = "Numeric GitHub owner id, used when GitHub issues ID-qualified OIDC subjects."
+  type        = string
+  default     = ""
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository id, used when GitHub issues ID-qualified OIDC subjects."
+  type        = string
+  default     = ""
+}
+
 variable "github_branch" {
   description = "Only this branch may assume the deploy role."
   type        = string
