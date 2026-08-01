@@ -13,6 +13,7 @@ jobs:
     env:
       AWS_REGION: us-east-1
       TF_IN_AUTOMATION: "true"
+      TF_VAR_alarm_email: ${{ secrets.ALARM_EMAIL }}
 
     steps:
       - name: Guard branch
