@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.10"
 
   backend "s3" {}
 
@@ -8,9 +8,8 @@ terraform {
     archive = { source = "hashicorp/archive", version = "~> 2.0" }
   }
 
-  # Local state, deliberately. A single operator and a single environment do not
-  # need locking or a shared backend; add an S3 backend with DynamoDB locking
-  # the moment a second person or a CI pipeline runs apply.
+  # Backend settings come from -backend-config in the deploy/destroy workflows.
+  # Locking is S3-native (use_lockfile), so no DynamoDB table is involved.
 }
 
 provider "aws" {
