@@ -294,7 +294,7 @@ deployed with zero clients connected — the normal resting state.
 | API Gateway WebSocket | $0.00 | ≈ $0.002/client-hour | $1.00/M messages + $0.25/M connection-minutes |
 | S3 + CloudFront | ≈ $0.00 | ≈ $0.00 | ~30KB of assets; 1TB/month CloudFront free tier |
 | CloudWatch | $0.00 | $0.00 | 10 alarms (10 free), 1 dashboard (3 free) |
-| SNS + Budgets | $0.00 | $0.00 | First 1k email notifications and 2 budgets free |
+| SNS | $0.00 | $0.00 | First 1k email notifications free |
 | **Total** | **≈ $29/month** | **≈ $0.01/client-hour** | |
 
 Two things fall out of this table.
@@ -313,29 +313,6 @@ stream-hour regardless of traffic, so an idle stream is ~$29/month and is
   which handles 1MB/s and 1,000 records/s — comfortably above the observed peak
   of ~150KB per poll. Edit `stream_mode` in
   [`terraform/modules/streaming/main.tf`](terraform/modules/streaming/main.tf).
-
-### Budget safety net
-
-`terraform/modules/monitoring/main.tf` provisions an account-level AWS Budget,
-default **$15/month**, emailing `alarm_email` at 80% of actual spend and at 100%
-of forecast.
-
-It is scoped to the whole account rather than the `project=aerofeed` tag on
-purpose: the failure being guarded against is an *orphaned* resource — a stream
-left behind by a partial destroy, a schedule that never got disabled — and an
-orphan is exactly the thing likely to have lost its tags.
-
-Note the deliberate calibration: **a permanently-running deployment with
-on-demand Kinesis (~$29) will trip a $15 budget.** That is the intended
-behaviour, not a misconfiguration. The budget is sized for the
-deploy-demo-destroy workflow, so it fires precisely when the stack has been left
-up longer than intended. Raise it with `-var budget_limit_usd=35` if you switch
-to a long-running deployment, or drop to a provisioned shard and the idle cost
-lands under the threshold on its own.
-
-CloudWatch alarms watch the pipeline; the budget watches the bill. They fail
-differently — a stuck rule or an orphaned stream costs money while every alarm
-stays green.
 
 ---
 

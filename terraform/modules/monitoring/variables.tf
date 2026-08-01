@@ -18,17 +18,6 @@ variable "iterator_age_threshold_ms" {
   default     = 60000
 }
 
-variable "budget_limit_usd" {
-  description = "Monthly account spend that trips the budget alert. A fully idle deployment is a few dollars, so 15 leaves room for a busy month without hiding a runaway resource."
-  type        = string
-  default     = "15"
-}
-
-variable "budget_name" {
-  type    = string
-  default = "aerofeed-monthly"
-}
-
 variable "topic_name" {
   type    = string
   default = "aerofeed-alarms"
