@@ -29,9 +29,11 @@ from ._common import (
     DEFAULT_LAT,
     DEFAULT_LON,
     GRID_SIZE_DEGREES,
+    POLLER_FUNCTION_NAME,
     POLL_RULE_NAME,
     get_connection_store,
     get_events,
+    get_lambda,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,19 @@ def enable_polling() -> None:
         logger.error("could not enable %s: %s", POLL_RULE_NAME, exc)
 
 
+def invoke_initial_poll() -> None:
+    """Kick one poll immediately so first load does not wait for the next tick."""
+    try:
+        get_lambda().invoke(
+            FunctionName=POLLER_FUNCTION_NAME,
+            InvocationType="Event",
+        )
+        logger.info("invoked initial poll via %s", POLLER_FUNCTION_NAME)
+    except ClientError as exc:
+        # The scheduled rule is already enabled, so this only costs latency.
+        logger.error("could not invoke initial poll %s: %s", POLLER_FUNCTION_NAME, exc)
+
+
 def handler(event, context):
     """Register a subscription for a connecting client.
 
@@ -170,5 +185,6 @@ def handler(event, context):
     # no body, and the viewport is not known until the map has laid out.
     if was_idle:
         enable_polling()
+        invoke_initial_poll()
 
     return {"statusCode": 200}

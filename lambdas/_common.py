@@ -43,6 +43,7 @@ MAX_CELLS_PER_CLIENT = int(os.environ.get("AEROFEED_MAX_CELLS", str(DEFAULT_MAX_
 # which is the whole cost argument: no subscribers, no invocations, no upstream
 # calls, no Kinesis writes.
 POLL_RULE_NAME = os.environ.get("AEROFEED_POLL_RULE", "aerofeed-poll-schedule")
+POLLER_FUNCTION_NAME = os.environ.get("AEROFEED_POLLER_FUNCTION", "aerofeed-poller")
 
 # EventBridge Scheduler one-shot that re-checks emptiness after a grace period.
 GRACE_SCHEDULE_NAME = os.environ.get("AEROFEED_GRACE_SCHEDULE", "aerofeed-grace-check")
@@ -84,6 +85,12 @@ def get_stream() -> KinesisStream:
 def get_events():
     """EventBridge, for enabling and disabling the poll rule."""
     return boto3.client("events")
+
+
+@lru_cache(maxsize=1)
+def get_lambda():
+    """Lambda client, used only to wake the poller on first connect."""
+    return boto3.client("lambda")
 
 
 @lru_cache(maxsize=1)

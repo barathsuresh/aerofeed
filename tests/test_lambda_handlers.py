@@ -102,11 +102,13 @@ def test_connect_registers_the_client_in_its_geoip_cell(connect_mod):
     store = FakeConnectionStore()
     with mock.patch.object(connect_mod, "get_connection_store", lambda: store), \
          mock.patch.object(connect_mod, "geoip", return_value=(13.08, 80.27, "Chennai")), \
-         mock.patch.object(connect_mod, "enable_polling") as enable:
+         mock.patch.object(connect_mod, "enable_polling") as enable, \
+         mock.patch.object(connect_mod, "invoke_initial_poll") as invoke:
         assert connect_mod.handler(connect_event(), None) == {"statusCode": 200}
 
     assert store.rows == {("abc", "10_80")}
     enable.assert_called_once()  # first connection wakes the poller
+    invoke.assert_called_once()  # and does not wait for the next minute tick
 
 
 def test_connect_prefers_an_explicit_query_override_over_geoip(connect_mod):
@@ -114,7 +116,8 @@ def test_connect_prefers_an_explicit_query_override_over_geoip(connect_mod):
     store = FakeConnectionStore()
     with mock.patch.object(connect_mod, "get_connection_store", lambda: store), \
          mock.patch.object(connect_mod, "geoip") as geo, \
-         mock.patch.object(connect_mod, "enable_polling"):
+         mock.patch.object(connect_mod, "enable_polling"), \
+         mock.patch.object(connect_mod, "invoke_initial_poll"):
         connect_mod.handler(connect_event(params={"lat": "51.5", "lon": "-0.1"}), None)
 
     assert store.rows == {("abc", "50_-5")}
@@ -126,7 +129,8 @@ def test_connect_falls_back_to_the_default_when_geoip_cannot_place_the_ip(connec
     store = FakeConnectionStore()
     with mock.patch.object(connect_mod, "get_connection_store", lambda: store), \
          mock.patch.object(connect_mod, "geoip", return_value=None), \
-         mock.patch.object(connect_mod, "enable_polling"):
+         mock.patch.object(connect_mod, "enable_polling"), \
+         mock.patch.object(connect_mod, "invoke_initial_poll"):
         connect_mod.handler(connect_event(source_ip="127.0.0.1"), None)
 
     assert store.rows == {("abc", "40_-75")}  # DEFAULT_LAT/LON -> New York
@@ -136,10 +140,12 @@ def test_connect_does_not_re_enable_polling_when_others_are_present(connect_mod)
     store = FakeConnectionStore({("existing", "50_-5")})
     with mock.patch.object(connect_mod, "get_connection_store", lambda: store), \
          mock.patch.object(connect_mod, "geoip", return_value=(51.5, -0.1, "London")), \
-         mock.patch.object(connect_mod, "enable_polling") as enable:
+         mock.patch.object(connect_mod, "enable_polling") as enable, \
+         mock.patch.object(connect_mod, "invoke_initial_poll") as invoke:
         connect_mod.handler(connect_event(connection_id="second"), None)
 
     enable.assert_not_called()
+    invoke.assert_not_called()
 
 
 def test_connect_rejects_an_event_without_a_connection_id(connect_mod):

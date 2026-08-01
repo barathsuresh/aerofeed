@@ -71,6 +71,8 @@ let moveTimer = null;
 let cellOutlines = [];
 let firstSubscription = true;
 let bootPoint = { lat: DEFAULT_LAT, lon: DEFAULT_LON };
+let userMovedMap = false;
+let applyingAutoLocation = false;
 // Set by anything that changes the count; drained once per animation frame.
 let countDirty = false;
 // Padded viewport, recomputed only when the map moves. upsert() consults it
@@ -134,13 +136,6 @@ async function geoipPoint() {
   }
 }
 
-/** URL override, then GeoIP, then the configured default. */
-async function subscriptionPoint() {
-  return urlPoint()
-      || await geoipPoint()
-      || { lat: DEFAULT_LAT, lon: DEFAULT_LON, source: 'default' };
-}
-
 /* --- map ------------------------------------------------------------------- */
 
 function initMap(point) {
@@ -154,6 +149,9 @@ function initMap(point) {
   // Culling runs on the same event but undebounced: the markers that just came
   // into view should appear with the pan, not 400ms after it.
   map.on('moveend', syncVisibility);
+  map.on('moveend', () => {
+    if (!applyingAutoLocation) userMovedMap = true;
+  });
 }
 
 /** Frame the map on the cell the server actually assigned us.
@@ -561,6 +559,18 @@ function connect(point) {
   socket.addEventListener('error', () => setStatus('connection error', 'down'));
 }
 
+function applyLocatedPoint(point) {
+  if (!point || userMovedMap || tracked.size) return;
+  bootPoint = point;
+  el.statusText.textContent = `locating via ${point.source}…`;
+  applyingAutoLocation = true;
+  const clearAutoLocation = () => { applyingAutoLocation = false; };
+  map.once('moveend', clearAutoLocation);
+  setTimeout(clearAutoLocation, 0);
+  map.setView([point.lat, point.lon], map.getZoom(), { animate: false });
+  sendSubscription();
+}
+
 /* --- visibility ------------------------------------------------------------ */
 
 /** Drop the connection so the backend stops polling for a tab nobody is watching.
@@ -599,15 +609,19 @@ document.addEventListener('visibilitychange', () => {
 /* --- boot ------------------------------------------------------------------ */
 
 (async function boot() {
-  // Endpoint first: connect() needs it, and both lookups are independent so
-  // they overlap rather than adding their latencies together.
-  const [endpoint, point] = await Promise.all([loadConfig(), subscriptionPoint()]);
-  wsUrl = endpoint;
-  bootPoint = point;
-  el.statusText.textContent = `locating via ${point.source}…`;
-  initMap(point);
-  connect(point);
+  const explicitPoint = urlPoint();
+  const initialPoint = explicitPoint || { lat: DEFAULT_LAT, lon: DEFAULT_LON, source: 'default' };
+  bootPoint = initialPoint;
+  el.statusText.textContent = explicitPoint
+    ? `locating via ${initialPoint.source}…`
+    : 'connecting…';
+  initMap(initialPoint);
   setInterval(sweepStale, SWEEP_MS);
   // One coalesced counter repaint per frame, instead of one per aircraft.
   (function tick() { renderCount(); requestAnimationFrame(tick); })();
+
+  if (!explicitPoint) geoipPoint().then(applyLocatedPoint);
+
+  wsUrl = await loadConfig();
+  connect(bootPoint);
 })();

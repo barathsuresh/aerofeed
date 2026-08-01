@@ -105,6 +105,11 @@ data "aws_iam_policy_document" "connect" {
     actions   = ["events:EnableRule", "events:DescribeRule"]
     resources = [var.poll_rule_arn]
   }
+  statement {
+    sid       = "InvokeInitialPoll"
+    actions   = ["lambda:InvokeFunction"]
+    resources = ["arn:aws:lambda:${var.region}:${var.account_id}:function:aerofeed-poller"]
+  }
 }
 
 # subscribe: moves a client's coverage as it pans and zooms. No rule toggling —
@@ -220,6 +225,7 @@ resource "aws_lambda_function" "this" {
       AEROFEED_GRID_SIZE        = tostring(var.grid_size_degrees)
       AEROFEED_MAX_CELLS        = tostring(var.max_cells_per_client)
       AEROFEED_POLL_RULE        = var.poll_rule_name
+      AEROFEED_POLLER_FUNCTION  = "aerofeed-poller"
       AEROFEED_WS_ENDPOINT      = var.ws_endpoint
       AEROFEED_GRACE_TARGET_ARN = "arn:aws:lambda:${var.region}:${var.account_id}:function:aerofeed-grace-check"
       AEROFEED_GRACE_ROLE_ARN   = var.scheduler_role_arn
@@ -237,7 +243,7 @@ resource "aws_lambda_event_source_mapping" "processor" {
   starting_position = "LATEST"
 
   batch_size                         = var.batch_size
-  maximum_batching_window_in_seconds = 5
+  maximum_batching_window_in_seconds = 1
 
   # Bounded, not the -1 default. Unlimited retries on a genuinely poisoned
   # record stall the shard until the record ages out of the stream.
