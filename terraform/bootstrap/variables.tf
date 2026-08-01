@@ -32,6 +32,12 @@ variable "github_branch" {
   default     = "cloud/aws"
 }
 
+variable "github_environment" {
+  description = "GitHub Actions environment the deploy job runs in."
+  type        = string
+  default     = "production"
+}
+
 variable "role_name" {
   type    = string
   default = "aerofeed-github-actions-deploy"

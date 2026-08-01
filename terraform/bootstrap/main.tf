@@ -13,13 +13,21 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  repo_subject = "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${var.github_branch}"
+  # A job that declares an `environment:` gets an environment subject instead of
+  # a ref subject, so both forms have to be trusted. GitHub can also append
+  # immutable numeric ids to the owner and repo names; those variants are added
+  # when the ids are supplied.
+  repo_prefixes = compact([
+    "repo:${var.github_owner}/${var.github_repo}",
+    var.github_owner_id != "" && var.github_repo_id != "" ? "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}" : "",
+  ])
 
-  # GitHub can issue the subject with immutable numeric ids appended to the owner
-  # and repo names. Accept that form too when the ids are supplied.
-  repo_subject_with_ids = "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/${var.github_branch}"
-
-  repo_subjects = var.github_owner_id != "" && var.github_repo_id != "" ? [local.repo_subject, local.repo_subject_with_ids] : [local.repo_subject]
+  repo_subjects = flatten([
+    for prefix in local.repo_prefixes : [
+      "${prefix}:ref:refs/heads/${var.github_branch}",
+      "${prefix}:environment:${var.github_environment}",
+    ]
+  ])
 
   tags = {
     project   = "aerofeed"
