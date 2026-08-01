@@ -25,9 +25,23 @@ Terraform · GitHub Actions with OIDC (no long-lived AWS keys)
 
 ## Demo
 
-Real output, captured from `python run_local.py` with a client subscribed over
-London — the client connects, gets snapped to a grid cell, and receives
-aircraft deltas as the poller pulls them:
+![Aerofeed tracking 589 aircraft over the western United States](docs/demo.gif)
+
+The deployed stack, recorded end to end. The counter starts at **0** and climbs
+to **589 aircraft tracked** — that ramp *is* the architecture working: the first
+connection enables the polling schedule (disabled at rest, costing nothing), the
+poller fans out one upstream request per region cell, and positions arrive
+through Kinesis and DynamoDB to be pushed down the WebSocket. The HUD's
+"4 cells (capped at 4 — zoom in for full coverage)" is
+[`MAX_CELLS_PER_CLIENT`](#region-cell-grid-bucketing--and-its-boundary-tradeoff)
+being honest about the upstream rate limit rather than silently under-covering
+the map.
+
+The initial fill takes up to a minute by design — see
+[first-connection latency](#first-connection-latency).
+
+Same pipeline locally, from `python run_local.py` with a client subscribed over
+London — connect, snap to a grid cell, receive deltas as the poller pulls them:
 
 ```
 20:15:20 INFO  aerofeed: websocket listening on ws://127.0.0.1:8765
@@ -48,12 +62,9 @@ aircraft deltas as the poller pulls them:
  "state": {"icao24": "a8f00e", "callsign": "UAL962",  "longitude": -6.91369, ...}}
 ```
 
-> **Screen capture pending.** The deployed stack is currently destroyed (see
-> [Cost](#cost)), so there is no live URL to record against. To capture one
-> after a deploy: `terraform output site_url`, open it, then record with
-> [`peek`](https://github.com/phw/peek) or
-> `ffmpeg -f x11grab -framerate 15 -i :0.0 -t 20 demo.gif`, and drop the result
-> in `docs/demo.gif`.
+> There is no live URL to click: the stack is destroyed between demos, which is
+> the deliberate cost posture described under [Cost](#cost). Redeploying takes
+> one workflow run.
 
 ---
 
@@ -217,6 +228,33 @@ reconnected, it does nothing. The schedule deletes itself via
 
 Net effect: an idle deployment invokes zero Lambdas, makes zero upstream
 requests, and writes zero Kinesis records.
+
+#### First-connection latency
+
+The bill for that: the first client to arrive after an idle period waits for the
+map to fill, which is the ramp visible in the demo above.
+
+| Step | Cost |
+|---|---|
+| `connect` → `EnableRule` | instant |
+| **Wait for the rule's next tick** | **0–60s** |
+| Poller: read cells, upstream query, 1.1s pacing | ~1–2s |
+| Kinesis → event source mapping batching window | up to 5s |
+| Processor cold start, delta check, `postToConnection` | ~1–2s |
+
+`rate(1 minute)` fires on its own cadence rather than from the moment it is
+enabled, so connecting just after a tick means waiting nearly the full minute.
+
+This is a *first*-connection cost, not a steady-state one. `subscribe` replays a
+snapshot straight from `aircraft-positions` for any newly-covered cell
+(`lambdas/subscribe_handler.py`), so panning and reconnecting paint immediately —
+the snapshot is only empty on a freshly deployed stack, before the table has
+been written to at all. Positions carry a 1h TTL, so reconnecting inside the
+hour is instant.
+
+The obvious improvement is for `connect` to invoke the poller directly
+(`InvocationType='Event'`) when it flips the rule on, cutting the wait to under
+ten seconds for one extra Lambda invocation. Not yet implemented.
 
 ### Region-cell grid bucketing — and its boundary tradeoff
 
