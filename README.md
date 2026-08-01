@@ -17,6 +17,10 @@ AWS account at all.
 DynamoDB · EventBridge (Rules + Scheduler) · SQS · CloudFront + S3 · CloudWatch ·
 Terraform · GitHub Actions with OIDC (no long-lived AWS keys)
 
+> **This is the `cloud/aws` branch** — the full deployed architecture. The
+> [`main`](../../tree/main) branch holds the dependency-free local pipeline the
+> same domain code runs against, with no cloud account required.
+
 ---
 
 ## Demo
