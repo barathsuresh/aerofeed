@@ -206,6 +206,20 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["*"]
   }
 
+  # Budgets is account-scoped and its ARNs are not regional, so it does not
+  # belong in the data-plane statement above.
+  statement {
+    sid = "ManageAerofeedBudget"
+    actions = [
+      "budgets:CreateBudget",
+      "budgets:DeleteBudget",
+      "budgets:DescribeBudget",
+      "budgets:ModifyBudget",
+      "budgets:ViewBudget",
+    ]
+    resources = ["arn:aws:budgets::${data.aws_caller_identity.current.account_id}:budget/*"]
+  }
+
   statement {
     sid     = "ManageAerofeedFrontendBucket"
     actions = ["s3:*"]

@@ -179,9 +179,10 @@ resource "aws_lambda_permission" "apigw" {
 # --- observability ------------------------------------------------------------
 
 module "monitoring" {
-  source      = "./modules/monitoring"
-  region      = var.region
-  alarm_email = var.alarm_email
+  source           = "./modules/monitoring"
+  region           = var.region
+  alarm_email      = var.alarm_email
+  budget_limit_usd = var.budget_limit_usd
 
   function_names = local.function_keys
   table_names    = local.table_names

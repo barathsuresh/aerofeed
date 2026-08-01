@@ -183,3 +183,41 @@ resource "aws_cloudwatch_dashboard" "aerofeed" {
   dashboard_name = var.dashboard_name
   dashboard_body = jsonencode(local.dashboard)
 }
+
+# --- account budget -----------------------------------------------------------
+#
+# The alarms above watch the pipeline; this watches the bill. They fail
+# differently: a stuck EventBridge Rule, a stream left provisioned after a
+# partial destroy, or an idle Kinesis on-demand stream at ~$0.04/stream-hour
+# (~$29/month, the largest standing cost here) all cost money while every
+# CloudWatch alarm stays green. Nothing else in this architecture would notice.
+#
+# Scoped to the whole account rather than to the project tag: the failure being
+# guarded against is an orphaned resource, and an orphan is exactly the thing
+# likely to have lost its tags.
+resource "aws_budgets_budget" "monthly" {
+  name         = var.budget_name
+  budget_type  = "COST"
+  limit_amount = var.budget_limit_usd
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  # Actual spend, on the way up. Catches something already running.
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.alarm_email]
+  }
+
+  # Forecast, so a stream switched on early in the month reports before the
+  # month's spend has actually landed.
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = [var.alarm_email]
+  }
+}

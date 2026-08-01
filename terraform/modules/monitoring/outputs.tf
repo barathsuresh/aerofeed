@@ -12,3 +12,5 @@ output "alarm_names" {
     [for a in aws_cloudwatch_metric_alarm.dynamo_throttled : a.alarm_name],
   )
 }
+
+output "budget_name" { value = aws_budgets_budget.monthly.name }

@@ -60,3 +60,9 @@ variable "max_cells_per_client" {
   type        = number
   default     = 4
 }
+
+variable "budget_limit_usd" {
+  description = "Monthly account spend that trips the budget alert. See the cost section in README.md: an idle on-demand Kinesis stream alone is ~$29/month, so this is sized for deploy-demo-destroy, not for a long-running deployment."
+  type        = string
+  default     = "15"
+}
