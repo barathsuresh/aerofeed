@@ -26,6 +26,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # The archive_file data sources have to resolve even for a destroy plan,
+      # so the staging directories must exist. Contents are irrelevant here.
+      - name: Package Lambda functions
+        run: scripts/build_package.sh
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
