@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  deployments: write
 
 jobs:
   destroy:
@@ -25,6 +26,11 @@ jobs:
 
       - name: Check out repository
         uses: actions/checkout@v4
+
+      # The archive_file data sources have to resolve even for a destroy plan,
+      # so the staging directories must exist. Contents are irrelevant here.
+      - name: Package Lambda functions
+        run: scripts/build_package.sh
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -60,6 +66,20 @@ jobs:
             --query 'logGroups[].logGroupName' \
             --output text); do
             aws logs delete-log-group --region "$AWS_REGION" --log-group-name "$group"
+          done
+
+      # The repository page keeps showing the production environment and its
+      # site URL until the deployment records are gone. GitHub refuses to delete
+      # an active deployment, so each one is marked inactive first.
+      - name: Clear GitHub deployments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for id in $(gh api --paginate "repos/$REPO/deployments?environment=production" --jq '.[].id'); do
+            gh api -X POST "repos/$REPO/deployments/$id/statuses" -f state=inactive --silent
+            gh api -X DELETE "repos/$REPO/deployments/$id" --silent
+            echo "deleted deployment $id"
           done
 
       - name: Destroy summary
