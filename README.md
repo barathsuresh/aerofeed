@@ -7,11 +7,12 @@ thousand subscribers over London cost exactly one API call; positions flow
 through Kinesis into DynamoDB, and only the deltas — an aircraft that actually
 moved — are pushed to connected clients. The whole pipeline is driven by
 connection count: the first client to connect enables the polling schedule, and
-a grace check disables it again once the last one leaves, which means an idle
-deployment runs zero Lambdas and makes zero upstream calls. The same domain
-code runs locally against SQLite, an `asyncio.Queue` and a local WebSocket
-server, so the entire system is developable with `python run_local.py` and no
-AWS account at all.
+also kicks one immediate poll so the first map does not wait for the next
+minute tick. A grace check disables the schedule again once the last client
+leaves, which means an idle deployment runs zero Lambdas and makes zero upstream
+calls. The same domain code runs locally against SQLite, an `asyncio.Queue` and
+a local WebSocket server, so the entire system is developable with
+`python run_local.py` and no AWS account at all.
 
 **Stack:** Python 3.13 · Lambda · API Gateway WebSocket · Kinesis Data Streams ·
 DynamoDB · EventBridge (Rules + Scheduler) · SQS · CloudFront + S3 · CloudWatch ·
@@ -30,14 +31,15 @@ Terraform · GitHub Actions with OIDC (no long-lived AWS keys)
 The deployed stack, recorded end to end. The counter starts at **0** and climbs
 to **589 aircraft tracked** — that ramp *is* the architecture working: the first
 connection enables the polling schedule (disabled at rest, costing nothing), the
-poller fans out one upstream request per region cell, and positions arrive
-through Kinesis and DynamoDB to be pushed down the WebSocket. The HUD's
+connect handler immediately wakes the poller, the poller fans out one upstream
+request per region cell, and positions arrive through Kinesis and DynamoDB to be
+pushed down the WebSocket. The HUD's
 "4 cells (capped at 4 — zoom in for full coverage)" is
 [`MAX_CELLS_PER_CLIENT`](#region-cell-grid-bucketing--and-its-boundary-tradeoff)
 being honest about the upstream rate limit rather than silently under-covering
 the map.
 
-The initial fill takes up to a minute by design — see
+The initial fill no longer waits for the one-minute schedule boundary — see
 [first-connection latency](#first-connection-latency).
 
 Same pipeline locally, from `python run_local.py` with a client subscribed over
@@ -110,6 +112,7 @@ flowchart TB
     subscribe --> conns
     disconnect --> conns
     connect -->|"EnableRule"| rule
+    connect -->|"async Invoke"| poller
     disconnect -->|"arm"| oneshot
     oneshot --> grace
     grace -->|"DisableRule if empty"| rule
@@ -227,19 +230,22 @@ requests, and writes zero Kinesis records.
 
 #### First-connection latency
 
-The bill for that: the first client to arrive after an idle period waits for the
-map to fill, which is the ramp visible in the demo above.
+The first client to arrive after an idle period still pays the cold path, but it
+no longer waits for the EventBridge Rule's next one-minute boundary. `connect`
+enables the recurring schedule for steady-state polling and also invokes the
+poller asynchronously once (`InvocationType='Event'`) for the initial fill.
 
 | Step | Cost |
 |---|---|
 | `connect` → `EnableRule` | instant |
-| **Wait for the rule's next tick** | **0–60s** |
+| `connect` → async poller invoke | instant best-effort |
 | Poller: read cells, upstream query, 1.1s pacing | ~1–2s |
-| Kinesis → event source mapping batching window | up to 5s |
+| Kinesis → event source mapping batching window | up to 1s |
 | Processor cold start, delta check, `postToConnection` | ~1–2s |
 
-`rate(1 minute)` fires on its own cadence rather than from the moment it is
-enabled, so connecting just after a tick means waiting nearly the full minute.
+The EventBridge Rule still runs at `rate(1 minute)` after that first kick. The
+direct invoke is best-effort: if it fails, the scheduled rule is already enabled
+and the next tick recovers the feed without rejecting the WebSocket connection.
 
 This is a *first*-connection cost, not a steady-state one. `subscribe` replays a
 snapshot straight from `aircraft-positions` for any newly-covered cell
@@ -247,10 +253,6 @@ snapshot straight from `aircraft-positions` for any newly-covered cell
 the snapshot is only empty on a freshly deployed stack, before the table has
 been written to at all. Positions carry a 1h TTL, so reconnecting inside the
 hour is instant.
-
-The obvious improvement is for `connect` to invoke the poller directly
-(`InvocationType='Event'`) when it flips the rule on, cutting the wait to under
-ten seconds for one extra Lambda invocation. Not yet implemented.
 
 ### Region-cell grid bucketing — and its boundary tradeoff
 
@@ -511,6 +513,10 @@ Deliberate, and documented rather than hidden:
   is the obvious next step; it needs per-record partial-failure handling.
 - **Lambda log groups have no retention policy**, so logs accumulate at
   $0.50/GB-month ingested. Low volume, but unbounded.
-- **GeoIP is an external HTTP call** in the connect path, costing a 2s timeout
-  on provider failure. A MaxMind GeoLite2 layer would make it local and
-  sub-millisecond, at the cost of a licence key and a build step.
+- **GeoIP is still an external HTTP call** in the backend `connect` path for
+  clients that do not pass `?lat=&lon=`, costing a 2s timeout on provider
+  failure. The browser avoids stacking another startup delay by painting the map
+  immediately from URL/default coordinates and applying its own GeoIP result
+  later only if the user has not moved the map. A MaxMind GeoLite2 layer would
+  make backend lookup local and sub-millisecond, at the cost of a licence key
+  and a build step.
