@@ -75,6 +75,9 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   }
 }
 
+# Unused: the S3 backend uses use_lockfile = true (native S3 locking), not
+# DynamoDB. Left in place because bootstrap is applied separately and this
+# isn't worth a destructive apply on its own.
 resource "aws_dynamodb_table" "locks" {
   name         = var.lock_table_name
   billing_mode = "PAY_PER_REQUEST"
@@ -204,20 +207,6 @@ data "aws_iam_policy_document" "deploy" {
       "sqs:*",
     ]
     resources = ["*"]
-  }
-
-  # Budgets is account-scoped and its ARNs are not regional, so it does not
-  # belong in the data-plane statement above.
-  statement {
-    sid = "ManageAerofeedBudget"
-    actions = [
-      "budgets:CreateBudget",
-      "budgets:DeleteBudget",
-      "budgets:DescribeBudget",
-      "budgets:ModifyBudget",
-      "budgets:ViewBudget",
-    ]
-    resources = ["arn:aws:budgets::${data.aws_caller_identity.current.account_id}:budget/*"]
   }
 
   statement {

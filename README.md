@@ -62,10 +62,6 @@ London — connect, snap to a grid cell, receive deltas as the poller pulls them
  "state": {"icao24": "a8f00e", "callsign": "UAL962",  "longitude": -6.91369, ...}}
 ```
 
-> There is no live URL to click: the stack is destroyed between demos, which is
-> the deliberate cost posture described under [Cost](#cost). Redeploying takes
-> one workflow run.
-
 ---
 
 ## Architecture
@@ -485,12 +481,28 @@ the behaviour lives in `local/poller.py`, which is the same code the local
 pipeline runs. Swapping DynamoDB for SQLite is three constructor substitutions,
 because `core/` only ever sees the protocols in `core/storage_interface.py`.
 
-## Known gaps
+## Known Limitations
 
 Deliberate, and documented rather than hidden:
 
 - **Cell boundary partitioning** — clients near an edge see one side only. See
   the tradeoff discussion above.
+- **No per-cycle cap on regions polled.** `MAX_CELLS_PER_CLIENT` (4) bounds
+  one client's share of the upstream budget, but nothing bounds the *total*
+  distinct cells polled across all clients in a cycle. Past ~54 concurrent
+  distinct regions (on top of whatever else is already active), the service
+  exceeds airplanes.live's 1 req/s budget and the poll cycle starts running
+  long instead of finishing in 60s. See
+  [`docs/poll-scheduling.md`](docs/poll-scheduling.md).
+- **No AWS Budget alert is currently configured.** One was built and then
+  reverted; it is not in place today. Regardless, it would only catch
+  variable usage — Kinesis's ~$29/month per-stream-hour charge (see
+  [Cost](#cost)) is the dominant cost driver and is billed the same whether
+  the stack sees traffic or not.
+- **`Processor._last_broadcast` is in-memory only.** A Lambda cold start
+  loses it, so the first cycle after a cold start can re-broadcast one
+  position that didn't actually change. Harmless — clients just see a
+  redundant update — but worth knowing rather than debugging as a mystery.
 - **`list_active_cells()` scans the GSI** and dedupes client-side. DynamoDB has
   no `DISTINCT`; the alternative is an aggregate item updated on every
   connect/disconnect — a write amplifier to avoid scanning a table sized by
