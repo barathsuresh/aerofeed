@@ -20,6 +20,17 @@ managed services is a handful of constructor substitutions at one wiring line.
 
 ---
 
+![Aerofeed tracking 589 aircraft over the western United States](docs/demo.gif)
+
+The same frontend and the same `core/` logic, recorded against the deployed AWS
+stack on the [`cloud/aws`](../../tree/cloud/aws) branch. The counter climbing
+from 0 to 589 is the polling cycle starting cold: that deployment keeps its
+schedule disabled while nobody is connected, so the first client to arrive pays
+a one-off wait to fill the map. Locally there is no such ramp — the scheduler
+runs every 15s from process start.
+
+---
+
 ## Run it
 
 No account, no credentials, no configuration — every setting has a working
